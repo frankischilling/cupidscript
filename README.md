@@ -1,455 +1,637 @@
-# CupidScript
+# cupidfm - file editing
 
-A lightweight C99 VM for a small scripting language. This repository contains a compact interpreter/VM written in portable C that exposes a clean C API for embedding and for extending with native functions.
+cupidfm is a terminal-based file manager implemented in C. It uses the `ncurses` library for the user interface, providing features like directory navigation, directory tree preview, file preview, file editing, and file information display. 
+
+![preview](img/preview2.png)
+
+<video src="img/demo.mp4" width="320" height="240" controls></video>
+
+### Terminal Requirements
+
+For proper emoji display:
+- Make sure your terminal emulator supports Unicode and emoji rendering
+For proper emoji and icon display:
+
+1. Install a Nerd Font (recommended):
+```bash
+# On Ubuntu/Debian:
+mkdir -p ~/.local/share/fonts
+cd ~/.local/share/fonts
+curl -fLO https://github.com/ryanoasis/nerd-fonts/releases/download/v3.1.1/JetBrainsMono.zip
+unzip JetBrainsMono.zip
+fc-cache -fv
+```
+
+2. Configure your terminal:
+- Set your terminal font to "JetBrainsMono Nerd Font" (or another Nerd Font)
+- Ensure your terminal emulator supports Unicode and emoji rendering
+- Set your locale to support UTF-8: `export LANG=en_US.UTF-8`
+
+Alternative fonts:
+- Noto Color Emoji (`sudo apt install fonts-noto-color-emoji`)
+- Fira Code Nerd Font
+- Hack Nerd Font
+
+If emojis aren't displaying correctly:
+1. Check your terminal supports Unicode: `echo -e "\xf0\x9f\x93\x81"`
+2. Verify locale settings: `locale`
+3. Try updating your terminal emulator to a newer version
+
+Note: Some terminal emulators like Alacritty, iTerm2, Konsole, and Kitty are known to work better with unicode/emojis. 
+
+## Prerequisites
+
+To build and run cupidfm, you must have the following packages installed:
+
+- **A C Compiler & Build Tools** (e.g. `gcc`, `make`)
+- **ncurses** development libraries (for terminal handling)
+- **libmagic** development libraries (for MIME type detection)
+- **zlib + bzip2 + xz** development libraries (archive preview via `cupidarchive`)
+- **xclip** (for clipboard support)
+
+### Installing Dependencies on Ubuntu/Debian
+
+Open a terminal and run:
+
+```bash
+sudo apt update
+sudo apt install build-essential libncurses-dev libmagic-dev zlib1g-dev libbz2-dev liblzma-dev xclip
+```
+
+### Installing Dependencies on Arch Linux
+
+Open a terminal and run:
+
+```bash
+sudo pacman -Syu
+sudo pacman -S base-devel ncurses file zlib bzip2 xz xclip
+```
+
+*Notes:*
+- On Arch, the package named **file** provides libmagic.
+- The package **base-devel** installs gcc, make, and other essential build tools.
 
 ---
 
-## What’s Included
+## Building the Project
 
-- **Core runtime:** lexer, parser, AST, VM, and a small standard library.
-- **Sample CLI (`src/main.c`):** demonstrates embedding and registering `fm.*` natives.
-- **Public headers:** `src/cupidscript.h` is the embedder-facing API.
-- **Examples/tests:** small scripts that exercise language features and stdlib.
+To compile the project, run the provided build script:
+
+```bash
+./dev.sh
+```
+
+This script invokes `make` (with predefined flags) to compile the source code and produce an executable named `cupidfm`.
+
+### Compilation Flags
+
+The build script uses flags such as:
+- `-Wall -Wextra -pedantic` to enable warnings
+- Additional warnings (`-Wshadow -Werror -Wstrict-overflow`)
+- Sanitizers (`-fsanitize=address -fsanitize=undefined`) for debugging
 
 ---
 
-## Quick Start
+## Running the Program
 
-```sh
-make
-bin/cupidscript examples/features.cs
+After building, start cupidfm with:
+
+```bash
+./cupidfm
 ```
 
-Other useful scripts:
-- `bin/cupidscript examples/test.cs`
-- `bin/cupidscript examples/stress.cs`
-- `bin/cupidscript examples/stacktrace.cs`
-- `bin/cupidscript examples/closures.cs`
-- `bin/cupidscript examples/time.cs`
-- `bin/cupidscript examples/benchmark.cs`
+Error logs (if any) will be saved to `log.txt`.
+
+# Features
+
+- Navigate directories using arrow keys
+- View file details and preview supported file types
+- Display MIME types based on file content using `libmagic`
+- Archive preview for common formats (`.zip`, `.tar`, `.tar.gz`, `.7z`, etc.) via `cupidarchive`
+- File type indicators with emoji icons:
+  - 📄 Text files
+  - 📝 C source files
+  - 🔣 JSON files
+  - 📑 XML files
+  - 🐍 Python files
+  - 🌐 HTML files
+  - 🎨 CSS files
+  - ☕ Java files
+  - 💻 Shell scripts
+  - 🦀 Rust files
+  - 📘 Markdown files
+  - 📊 CSV files
+  - 🐪 Perl files
+  - 💎 Ruby files
+  - 🐘 PHP files
+  - 🐹 Go files
+  - 🦅 Swift files
+  - 🎯 Kotlin files
+  - ⚡ Scala files
+  - 🌙 Lua files
+  - 📦 Archive files
+- Text editing capabilities within the terminal
+- Directory tree visualization with permissions
+- File information display (size, permissions, modification time)
+- Background directory size calculation with a live "Calculating... <size so far>" progress display
+- Scrollable preview window
+- Tab-based window switching between directory and preview panes
+- Configure keybinds
+
+## Performance
+
+CupidFM is optimized for speed and efficiency. Our comprehensive test suite (63 tests across 8 suites) and performance benchmarks demonstrate excellent performance characteristics:
+
+### Core Data Structure Performance
+
+- **Vector Operations:**
+  - Add 100 elements: **0.645 μs** (645 ns)
+  - Element access: **1.95 ns**
+  - Capacity management: **651-749 ns**
+
+- **VecStack Operations:**
+  - Push/pop: **0.167 μs** (166.5 ns) - **50% faster** after optimization
+  - Peek: **2.03 ns** (100x faster than push/pop, as expected)
+  - Large stack (1k elements): **15.6 μs**
+
+### File System Operations
+
+- **Path Join:** **38-138 ns** depending on complexity
+- **Directory Reading:**
+  - Small directories (`/tmp`): **42.6 μs** (hot cache)
+  - Medium directories (`/usr/lib`, 99 entries): **10.5 μs** (hot cache)
+  - Large directories (`/usr/bin`, 2,254 entries): **325.4 μs** (hot cache)
+- **Cold Cache Performance** (realistic browsing scenario):
+  - First read is **1.75-3.8x slower** than hot cache, demonstrating the importance of OS page caching
+  - Warm steady-state matches hot cache performance
+
+### Optimizations Applied
+
+1. **VecStack Optimizations** - Achieved **32% performance improvement**:
+   - Cached Vector length to eliminate redundant function calls
+   - Used `Vector_set_len_no_free` for push operations
+   - Pre-allocated capacity (10 elements) to reduce reallocations
+
+2. **Memory Safety** - All critical memory issues fixed:
+   - Safe `realloc` usage with temporary pointers
+   - Proper memory cleanup in all data structures
+   - Zero memory leaks (validated with AddressSanitizer and Valgrind)
+
+3. **String Operations:**
+   - `strlen`: **1.90 ns**
+   - `strncpy`: **7.34 ns**
+   - `snprintf`: **54.52 ns**
+
+For detailed performance analysis and test suite documentation, see [`TESTING_AND_PERFORMANCE.md`](TESTING_AND_PERFORMANCE.md).
+
+## Configuration
+
+### Keybinds (Quick Reference)
+
+All keybinds are configurable via `~/.cupidfmrc`. These are the defaults.
+
+### Browser Mode (Directory/Preview)
+
+| Action | Default |
+| --- | --- |
+| Move up | `KEY_UP` |
+| Move down | `KEY_DOWN` |
+| Go to parent directory | `KEY_LEFT` |
+| Enter directory | `KEY_RIGHT` |
+| Switch Directory/Preview pane | `Tab` |
+| Exit | `F1` |
+| Edit file (from Preview pane) | `^E` |
+| Copy | `^C` |
+| Paste | `^V` |
+| Cut | `^X` |
+| Delete | `^D` |
+| Rename | `^R` |
+| New file | `^N` |
+| New directory | `Shift+N` |
+| Fuzzy search | `^F` |
+| Select all (current view) | `^A` |
+| Open console | `^O` |
+
+### Search Prompt
+
+| Action | Key |
+| --- | --- |
+| Move selection | `KEY_UP` / `KEY_DOWN` |
+| Page | `PageUp` / `PageDown` |
+| Accept (keep filtered list) | `Enter` |
+| Cancel (restore previous selection) | `Esc` |
+
+### Edit Mode
+
+| Action | Default |
+| --- | --- |
+| Move cursor | `KEY_UP` / `KEY_DOWN` / `KEY_LEFT` / `KEY_RIGHT` |
+| Save | `^G` |
+| Quit | `^Q` |
+| Backspace | `KEY_BACKSPACE` |
+
+### Default Keybindings
+
+cupidfm comes with a set of **default keybindings**. On **first run**, if cupidfm cannot find a user configuration file, it will **auto-generate** one at:
+
+```
+~/.cupidfmrc
+```
+
+Below is a screenshot showing the start up
+
+![preview](img/startup.png)
+
+This auto-generated config file includes default bindings, for example:
+The default includes `key_search=^F` (Ctrl+F) for fuzzy search and `key_new_dir=Shift+N` for creating directories, both of which you can change by editing `~/.cupidfmrc` and restarting CupidFM.
+
+```
+key_up=KEY_UP
+key_down=KEY_DOWN
+key_left=KEY_LEFT
+key_right=KEY_RIGHT
+key_tab=Tab
+key_exit=F1
+
+key_edit=^E
+key_copy=^C
+key_paste=^V
+key_cut=^X
+key_delete=^D
+key_rename=^R
+key_new=^N
+key_search=^F
+key_new_dir=Shift+N
+key_select_all=^A
+key_undo=^Z
+key_redo=^Y
+key_permissions=^P
+key_console=^O
+
+edit_up=KEY_UP
+edit_down=KEY_DOWN
+edit_left=KEY_LEFT
+edit_right=KEY_RIGHT
+edit_save=^G
+edit_quit=^Q
+edit_backspace=KEY_BACKSPACE
+```
+
+**Immediately after creating** `~/.cupidfmrc` for the first time, CupidFM will display a **popup** in the interface letting you know where it wrote your new config.
+
+### Editing the Config File
+
+After CupidFM creates this file, you are free to **edit** it to customize keybindings or add new mappings. Here are some rules/notes:
+
+1. **Valid Formats**
+
+   - You may use special ncurses names like `KEY_UP`, `KEY_DOWN`, `KEY_LEFT`, etc.
+   - You can assign **Ctrl**+**key** by using a caret, e.g. `^C`.
+   - Single characters (`a`, `b`, `x`) are also valid.
+
+2. **Commenting and Whitespace**
+
+   - Lines beginning with `#` are treated as comments and ignored.
+   - Blank or whitespace-only lines are also ignored.
+
+3. **Sample**
+
+   If you only want to change the exit key from **F1** to **Esc**, you might do:
+   ```text
+   key_exit=27
+   ```
+   since **ASCII 27** is **Esc** in decimal form.
+
+4. **Restart Required**
+
+   - Changes to `~/.cupidfmrc` take effect **next time** you launch CupidFM.
+
+### Where CupidFM Searches for the Config
+
+1. **`~/.cupidfmrc`**  
+   By default, CupidFM looks for this file in your home directory.
+
+2. **No config found?**  
+   - CupidFM loads **hard-coded defaults** (arrow keys, F1, etc.) 
+   - Automatically **writes** a new file to `~/.cupidfmrc`, which you can later edit.
+
+3. **Config exists but can’t be loaded?**  
+   - CupidFM keeps defaults and shows a **Configuration Errors** popup instead of overwriting your config.
+
+### Common Changes to the Config
+
+- **Changing the Exit Key**  
+  ```text
+  key_exit=F10
+  ```
+  or
+  ```text
+  key_exit=27  # 27 = ESC
+  ```
+- **Using Emacs-like Keys**  
+  If you prefer `Ctrl+P` for up and `Ctrl+N` for down:
+  ```text
+  key_up=^P
+  key_down=^N
+  ```
+- **Remapping Left/Right**  
+  ```text
+  key_left=KEY_BACKSPACE
+  key_right=KEY_ENTER
+  ```
+
+### Troubleshooting
+
+- **Config Not Created**:  
+  Make sure you have a valid `$HOME` environment variable set. If `$HOME` is missing or empty, CupidFM will try to create the config in the current directory instead.
+- **Invalid or Unknown Key**:  
+  If you enter an invalid key name, it will be ignored and remain at default. Check the logs or run from a terminal to see error messages.
+- **Changing Keybindings**:
+  - If something stops working after changes, revert the line or remove it to fall back to the default.
+  - You can always delete `~/.cupidfmrc` and relaunch to regenerate a fresh config.
+
+With these steps, you can **fully customize** your keybindings in `~/.cupidfmrc`. If you ever lose or remove it, CupidFM will rewrite the default file and let you know on the next run!
+
+## Plugins (CupidScript)
+
+CupidFM can load Cupidscript plugins (`.cs`) on startup.
+
+By default it loads from your home directory:
+
+1. `~/.cupidfm/plugins`
+2. `~/.cupidfm/plugin`
+
+Local/repo plugin folders are supported, but are disabled by default (to avoid accidentally executing repo scripts):
+
+- Enable local plugin loading with: `CUPIDFM_LOAD_LOCAL_PLUGINS=1`
+- Then CupidFM will also search:
+  - `./cupidfm/plugins` and `./cupidfm/plugin`
+  - `./plugins` and `./plugin`
+
+### Plugin Hooks
+
+- `fn on_load()`
+- `fn on_key(key)` -> return `true` to consume the keypress
+- `fn on_dir_change(new_cwd, old_cwd)`
+- `fn on_selection_change(new_name, old_name)`
+
+### CupidFM Script API
+
+- `fm.notify(msg)` / `fm.status(msg)` - show a notification
+- `fm.popup(title, msg)` - show a popup
+- `fm.console_print(msg)` / `fm.console(msg)` - append to the in-app console (`^O` by default)
+- `fm.prompt(title, initial)` -> `string|nil`
+- `fm.confirm(title, msg)` -> `bool`
+- `fm.menu(title, items[])` -> `index|-1`
+- `fm.cwd()` - current directory
+- `fm.selected_name()` / `fm.selected_path()` - current selection
+- `fm.cursor()` / `fm.count()` - cursor index + list size
+- `fm.search_active()` / `fm.search_query()` - fuzzy search state
+- `fm.pane()` - `"directory"` or `"preview"`
+- `fm.bind(key, func_name)` - bind a key to a function (key can be `"^T"`, `"F5"`, `"KEY_UP"`, or a numeric keycode)
+- File operations (integrated with undo/redo):
+  - `fm.copy(path_or_paths, dst_dir)`
+  - `fm.move(path_or_paths, dst_dir)`
+  - `fm.rename(path, new_name)`
+  - `fm.delete(path_or_paths)` (trash)
+  - `fm.mkdir(name_or_path)`
+  - `fm.touch(name_or_path)`
+  - `fm.undo()` / `fm.redo()`
+- `fm.reload()` - request a directory reload
+- `fm.exit()` - request CupidFM to quit
+- `fm.cd(path)` - change directory (absolute or relative)
+- `fm.select(name)` / `fm.select_index(i)` - move selection (best effort)
+- `fm.key_name(code)` / `fm.key_code(name)` - convert between keycodes and names
+
+See `plugins/examples/` for example scripts (not auto-loaded) and `CUPIDFM_CUPIDSCRIPT_API.md` for the full API reference.
+## Todo
+
+### High Priority
+- [ ] Add file filtering options
+- [ ] Add image preview (in house lib?)
+- [ ] Write custom magic library for in-house MIME type detection
+
+### Features
+- [ ] Implement syntax highlighting for supported file types (use config system like micro)
+- [ ] Implement text editing shortcuts:
+  - [ ] Shift+arrow for selection
+  - [ ] Ctrl+arrow for faster cursor movement
+  - [ ] Standard shortcuts (Ctrl+X, Ctrl+C, Ctrl+V)
+  - [ ] Add undo/redo functionality in edit mode
+  - [ ] Implement proper text selection in edit mode
+- [ ] Add a quick select feature for selecting file names, dir names, and current directory
+- [X] Add configuration file support for customizing:
+  - [X] Key bindings
+  - [ ] Color schemes
+  - [ ] Default text editor (using in house editor)
+  - [ ] File associations
+  - [ ] Change default text preview files
+- [ ] Basic file dialog for web and other applications
+- [ ] Use YSAP make-diagram program to learn more about files
+
+### Todo List for Command Line Feature
+
+- [ ] Design and implement the command bar UI.
+- [ ] Add a command parser to interpret user input.
+- [ ] Implement core file operations (`cd`, `ls`, `open`, etc.).
+- [ ] Add error handling and feedback messages.
+- [ ] Support command history with Up/Down arrow keys.
+- [ ] Implement tab-based auto-completion for file and directory names.
+- [ ] Develop custom cupidfm commands (`tree`, `info`, etc.).
+- [ ] Integrate with system shell commands.
+- [ ] Allow user-defined aliases in a configuration file.
+
+### Completed
+- [X] Fallback to extension-based detection instead of MIME type when detection fails
+- [X] Fix directory list not staying within the border
+- [X] Implement directory tree preview for directories
+- [X] Fix weird crash on different window resize
+- [X] Fix text buffer from breaking the preview win border
+- [X] Fix issue with title banner notif rotating showing char when rotating from left side to right
+- [X] Fix inputs being overloaded and taking awhile to execute
+- [X] Add build version and name display
+- [X] Add cursor highlighting to text editing buffer
+- [X] Add line numbers to text editing buffer
+- [X] Fix preview window not updating on directory enter and leave
+- [X] Implement proper file item list
+- [X] Fix directory list being too big and getting cut off
+- [X] Fix crashing when trying to edit too small of a file
+- [X] Add support for sig winch handling
+- [X] Fix being able to enter directory before calculation is done
+- [X] Add directory window scrolling
+- [X] Add tree structure visualization with proper icons and indentation
+- [X] File info not using emojis
+- [X] Add text display on tree preview when user enters an empty dir and on dir preview
+- [X] Enable scrolling for tree preview in the preview window when tabbed over
+- [X] Add preview support for `.zip` and `.tar` files - implemented via cupidarchive
+- [X] Fix directory preview not scrolling 
+- [X] Implement proper memory management and cleanup for file attributes and vectors
+- [X] Add error handling for failed memory allocations
+- [X] Optimize file loading performance for large directories
+- [X] Optimize scrolling, also make sure tree preview is optimized 
+- [?] Use tree command to rewrite tree preview
+- [X] Fixed cursor issue in directory window scroll
+- [X] Fix dir size calc not working (wont calc files inside)
+- [X] Fix long preview file names
+- [X] Add file operations:
+  - [X] Copy/paste files and directories
+  - [X] Create new file/directory
+  - [X] Delete file/directory
+  - [X] Rename file/directory
+- [X] Display symbolic links with correct arrow notation (e.g., `->` showing the target path)
+- [X] Basic install script for building, installing nerd fonts and other dependencies, and then moving the executable to /usr/bin
+- [X] Implement file search functionality (fuzzy search)
+- [X] Implement lazy loading for large directories
+- [X] Optimize memory usage for file preview
+- [X] Cache directory contents for faster navigation
+- [X] Improve MIME type detection performance
+- [X] Implement background loading for directory contents
+- [X] Banner bug when its going lefct the fisrst tick it goes in it goes to the right one tick then back like normal 
+
+### Edit Mode Issues
+- [X] Banner marquee not rotating correctly when rotating in edit mode
+  - [X] Fix issue casued by patch, they are in seperate locations dpeedning on timing 
+- [X] Fix banner not rotating when prompted eg. (new file or dir)
+  - [X] Fix issue casued by patch, they are in seperate locations dpeedning on timing 
+- [X] Fix sig winch handling breaking while in edit mode
+- [X] Fix cursor showing up at the bottom of the text editing buffer
+- [X] Fix text buffer not scrolling to the right when typing and hitting the border of the window
+- [X] Custom plugin system with cupidscript a custom scripting lang
+- [X] Implement file/directory permissions editing
+### Key Features to Implement
+
+## Command Line Interface (CLI) Feature
+
+### Overview
+
+The **Command Line Interface (CLI)** for **cupidfm** will introduce a powerful way for users to perform common file operations directly from the application, similar to a terminal within the file manager. This feature will enable users to execute commands like navigating directories, opening files, copying/moving files, and even running system commands without leaving the **cupidfm** interface.
+
+### Planned Features for the CLI
+
+- **Command Input**: 
+  - Users will have access to a bottom command bar where commands can be typed.
+  - Basic commands like `cd`, `ls`, `open`, `copy`, `move`, `delete` will be supported.
+
+- **Command History**:
+  - Pressing the **Up/Down arrow keys** will cycle through previously executed commands, similar to a traditional terminal.
+
+- **Tab Completion**:
+  - Auto-complete file and directory names by pressing **TAB** while typing a command.
+
+- **Error Handling**:
+  - Clear and descriptive error messages will be displayed in the command bar when commands fail (e.g., "File not found" or "Permission denied").
+
+- **Custom cupidfm Commands**:
+  - Extend the functionality of traditional file operations with cupidfm-specific commands, such as:
+    - `tree`: Display the directory tree structure.
+    - `preview [file]`: Quickly open a file in the preview window.
+    - `info [file/dir]`: Show detailed information about a file or directory.
+
+- **System Command Integration**:
+  - Run standard shell commands like `grep`, `find`, `chmod`, and others directly from the cupidfm command bar.
 
 ---
 
-## Language Overview
+### Future Plans for File Operations Shortcuts 
+- [X] **Notification on shortcut**
+  - [ ] Convert the notfication bar to work with the command line
+  - Ex. When a user enters command mode it will show up where the notifications does.
 
-CupidScript is intentionally small: a tree-walk interpreter with dynamic values and a C embedding API.
+- [X] **Copy and Paste (Ctrl+C, Ctrl+V)**  
+  - Copy selected file or directory.
+  - Paste copied item into the current directory.
 
-### Syntax (core)
+- [X] **Cut and Paste (Ctrl+X, Ctrl+V)**  
+  - Move selected file or directory.
+  - Paste cut item into the current directory.
 
-```cs
-let name = expr;     // declaration (optional initializer)
-name = expr;         // assignment
+- [X] **Delete (Ctrl+D)**
+  - [X] Delete selected file or dir with no prompt
+  - [X] Delete selected file or directory with a confirmation prompt.
 
-fn add(a, b) {       // function definition
-  return a + b;
-}
+- [X] **Rename (Ctrl+R)**  
+  - Rename the selected file or directory.
 
-if (cond) { ... } else { ... }
-while (cond) { ... }
-return expr;
-```
+- [X] **Create New File (Ctrl+N)**  
+  - Create a new, empty file in the current directory.
 
-### Expressions
+- [X] **Create New Directory (Shift+N)**  
+  - Create a new directory in the current directory.
 
-- Operators with precedence: `||`, `&&`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `%`, unary `!`, unary `-`
-- Strings: `"..."` with escapes `\n`, `\t`, `\r`, `\"`, `\\`
-- Dynamic values: `nil`, `true/false`, integers, strings, functions, native functions, lists, maps
+- [X] **Select All (Ctrl+A)**  
+  - Select all files and directories in the current view.
 
-Notes:
-- `+` supports `int + int` and string concatenation (if either operand is a string).
-- `&&` / `||` short-circuit.
+- [X] **File Search (Ctrl+F)**  
+  - Search for files or directories by name or pattern.
 
-### Lists and Maps
+- [X] **Quick File Info (Ctrl+T)**  
+  - Display detailed information about the selected file or directory.
 
-Lists and maps are first-class dynamic values.
+- [X] **Undo/Redo (Ctrl+Z / Ctrl+Y)**  
+  - Undo or redo the last file operation.
 
-```cs
-let xs = list();
-push(xs, 10);
-push(xs, 20);
-xs[1] = 99;
-print(xs[0], xs[1], len(xs)); // 10 99 2
+- [X] **File Permissions (Ctrl+P)**  
+  - Edit permissions of the selected file or directory.
 
-let m = map();
-m["name"] = "cupid";
-print(m["name"]);             // cupid
-print(keys(m));               // list of string keys
-```
+- [ ] **Quick Move (F2)**  
+  - Open a prompt to quickly move the selected file or directory to a specified path.
 
-Indexing rules:
-- `list[int]` -> element or `nil` if out of range
-- `map[string]` -> value or `nil` if missing
-- Assignment supports `xs[i] = v` and `m["k"] = v`
+- [ ] **Batch Operations (Ctrl+Shift+B)**  
+  - Perform batch operations like copying, moving, or deleting multiple selected files.
 
-Practical plugin pattern (structured state/config):
+- [ ] **Symbolic Link Creation (Ctrl+L)**  
+  - Create a symbolic link for the selected file or directory.
 
-```cs
-let state = map();
-state["enabled"] = true;
-state["bindings"] = list();
-push(state["bindings"], "F5");
-```
+- [ ] **File Filtering (Ctrl+Shift+F)**  
+  - Apply filters to display files by type, size, or modification date.
 
-Current limitations (by design, for v0 simplicity):
-- Map keys are strings only (use `m["key"]` / `mset(m, "key", v)`).
-- No built-in `for` loop; iterate with `while` + `len()` + indexing, and use `keys(map)` for map keys.
+- [ ] **Open command bar (Ctrl+Shift+C)**
+  - Lets users type in command bar
+    
+#### **1. Command Bar Design**
+- [ ] Add a command bar at the bottom of the **cupidfm** interface.
+- [ ] Display typed commands dynamically and update the UI to show results or error messages.
 
-### Multi-file scripts
+#### **2. Command Execution**
+- [ ] Parse and interpret user input.
+- [ ] Support basic file operations (`open`, `cd`, `ls`, `copy`, `move`, `delete`, etc.).
+- [ ] Integrate with system utilities for advanced commands.
 
-Stdlib provides:
-- `load("file.cs")`: executes another script file every time it’s called
-- `require("file.cs")`: executes a file once per VM (subsequent calls are no-ops)
+#### **3. Real-Time Feedback**
+- [ ] Display real-time feedback or results in the command bar.
+- [ ] Handle errors gracefully and inform users of invalid commands or paths.
 
-Paths are resolved relative to the currently-running script file’s directory.
+#### **4. Custom Commands**
+- [ ] Introduce cupidfm-specific commands for enhanced functionality, like:
+  - `tree`
+  - `preview`
+  - `info`
 
-### Field access and method calls
+#### **5. System Command Integration**
+- [ ] Allow users to run basic shell commands without leaving the application.
+- [ ] Commands like `grep` and `chmod` should work seamlessly.
 
-`obj.field` is supported as field access:
-- If `obj` is a map, `obj.field` returns the same value as `obj["field"]`.
-
-`obj.method(a, b)` is supported as a method call (currently used by `strbuf`).
-
-Compatibility note: CupidFM-style dotted globals still work (e.g. `fm.status("hi")`) even if `fm` is not a script value; the VM falls back to looking up a global named `"fm.status"`.
-
-### Function references and closures
-
-Functions are values, so you can pass them to native APIs as callbacks:
-
-```cs
-fn on_key(key) {
-  print("key:", key);
-}
-
-// Example: fm.on("key", on_key)
-```
-
-CupidScript also supports closures (functions capturing variables) and anonymous function literals:
-
-```cs
-fn make_counter() {
-  let n = 0;
-  return fn() { n = n + 1; return n; };
-}
-
-let c = make_counter();
-print(c(), c(), c()); // 1 2 3
-```
-
----
-
-## Directory Overview
-
-- `src/cs_value.c`, `src/cs_lexer.c`, `src/cs_parser.c`, `src/cs_vm.c`, `src/cs_stdlib.c` – core runtime and standard library implementations.
-- `src/main.c` – sample program showing how to bootstrap the VM and expose native functions (the `fm.*` API in this project).
-- **Headers:** `src/cupidscript.h`, `src/cs_vm.h`, `src/cs_value.h` – public API and value types.
-- `Makefile` – simple build system producing a library and a small executable.
-
----
-
-## Build
-
-### Prerequisites
-
-- A C99-compliant compiler (gcc/clang) and a POSIX-like toolchain.
-- `make` (as specified by the provided Makefile).
-
-### Build with Make (recommended)
-
-```sh
-make all
-```
-
-This should produce:
-- `libcupidscript.a` in `bin/`
-- `cupidscript` (executable) in `bin/`
-
-### Manual Build (if you don’t have make)
-
-```sh
-CC=gcc
-CFLAGS="-std=c99 -Wall -Wextra -O2 -g -D_POSIX_C_SOURCE=200809L"
-SRCDIR=src
-OBJDIR=obj
-BINDIR=bin
-AR=ar
-ARFLAGS=rcs
-
-mkdir -p $OBJDIR $BINDIR
-
-# Compile sources
-for f in cs_value.c cs_lexer.c cs_parser.c cs_vm.c cs_stdlib.c; do
-  $CC $CFLAGS -Isrc -c "$SRCDIR/$f" -o "$OBJDIR/${f%.*}.o"
-done
-
-# Create library
-$AR $ARFLAGS "$BINDIR/libcupidscript.a" "$OBJDIR"/*.o
-
-# Compile CLI (example main)
-$CC $CFLAGS -Isrc -c "$SRCDIR/main.c" -o "$OBJDIR/main.o"
-# Link executable
-$CC $CFLAGS -Isrc "$OBJDIR/main.o" "$BINDIR/libcupidscript.a" -o "$BINDIR/cupidscript"
-```
+#### **6. Configurable Aliases**
+- [ ] Allow users to create command aliases for frequently used commands (e.g., alias `ls` to `list`).
 
 ---
 
 ## Usage
 
-#### Embedder usage (typical flow):
-
-1. Create a VM:  
-   ```c
-   cs_vm* vm = cs_vm_new();
-   ```
-2. Register stdlib:  
-   ```c
-   cs_register_stdlib(vm);
-   ```
-3. Expose natives:  
-   ```c
-   cs_register_native(vm, "my.native", my_fn, NULL);
-   ```
-4. Run code from file:  
-   ```c
-   cs_vm_run_file(vm, "script.cs");
-   ```
-   Or run from a string:  
-   ```c
-   cs_vm_run_string(vm, code, "<string>");
-   ```
-5. Call a named script function:  
-   ```c
-   cs_call(vm, "function_name", argc, argv, &out);
-   ```
-   Or call a function value (callback) you previously stored:  
-   ```c
-   cs_call_value(vm, fn_value, argc, argv, &out);
-   ```
-6. Retrieve errors:  
-   ```c
-   const char* err = cs_vm_last_error(vm);
-   ```
-7. Strings:  
-   ```c
-   cs_str(vm, "hello"); /* and convert to C with cs_to_cstr(out_val); */
-   ```
-
----
-
-## Key Types and API
-
-- **Value types** (`cs_type`, exposed via `cupidscript.h`):
-  - `CS_T_NIL`, `CS_T_BOOL`, `CS_T_INT`, `CS_T_STR`, `CS_T_LIST`, `CS_T_MAP`, `CS_T_FUNC`, `CS_T_NATIVE`
-- **Core value wrapper:**  
-  ```c
-  cs_value { type; union { int b; int64_t i; void* p; } as; }
-  ```
-- **Public helpers:**
-  - `cs_vm_new`, `cs_vm_free`
-  - `cs_vm_run_file`, `cs_vm_run_string`
-  - `cs_register_native`, `cs_call`
-  - `cs_call_value` (call a function value from C)
-  - `cs_vm_last_error` / `cs_error` (get/set VM error from native code)
-  - `cs_last_error` (compat getter; returns `NULL` if no error)
-  - `cs_to_cstr`, `cs_nil`, `cs_bool`, `cs_int`, `cs_str`, `cs_str_take`
-  - `cs_list`, `cs_map`
-  - `cs_value_copy`, `cs_value_release` (retain/release values for host storage)
-
----
-
-## Standard Library (Current)
-
-CupidScript’s stdlib is implemented in `src/cs_stdlib.c` and registered via `cs_register_stdlib(vm)`.
-
-### Core helpers
-
-- `print(...)` → prints values to stdout
-- `assert(cond, "message")` → sets a VM error and aborts execution if `cond` is falsy
-- `typeof(x)` → returns `"nil" | "bool" | "int" | "string" | "list" | "map" | ...`
-- `getenv("NAME")` → returns a string or `nil`
-
-### Multi-file loading
-
-- `load(path)` → executes another script file (every call)
-- `require(path)` → executes another script once per VM
-
-### List helpers
-
-- `list()` → new list
-- `len(list|string|map)` → length
-- `push(list, value)` → append
-- `pop(list)` → pop last element (or `nil`)
-
-### Map helpers
-
-- `map()` → new map
-- `mget(map, key)` → get value (or `nil`)
-- `mset(map, key, value)` → set value
-- `mhas(map, key)` → bool
-- `keys(map)` → list of keys (strings)
-
-Note: You can usually use indexing instead of `mget/mset`:
-`m["k"]`, `m["k"] = v`.
-
-### String helpers
-
-- `str_find(s, sub)` → index (or `-1`)
-- `str_replace(s, old, repl)` → new string
-- `str_split(s, sep)` → list of strings
-
-### Path helpers
-
-- `path_join(a, b)` → joined path (simple join)
-- `path_dirname(path)` → directory portion
-- `path_basename(path)` → basename
-- `path_ext(path)` → extension without dot (or `""`)
-
-### Formatting
-
-- `fmt("x=%d s=%s b=%b v=%v", ...)` → formatted string
-  - `%d` int, `%s` string, `%b` bool, `%v` any value (best-effort), `%%` literal percent
-
-### Time helpers
-
-- `now_ms()` → current wall-clock time in milliseconds (int)
-- `sleep(ms)` → sleep for `ms` milliseconds (blocking; implemented via POSIX `nanosleep`)
-
-### `strbuf` (string builder)
-
-For high-performance string construction, use the native string builder:
-
-```cs
-let b = strbuf();
-b.append("x");
-b.append(123);
-let s = b.str();
-```
-
-Methods:
-- `b.append(x)` → appends a value (`string`, `int`, `bool`, `nil`)
-- `b.str()` → returns a string snapshot
-- `b.len()` → current length (bytes)
-- `b.clear()` → clears the buffer
-
----
-
-## Design Notes
-
-- The runtime is split into:
-  - **cs_value.c/h**: value representation and helpers for scalar and heap objects.
-  - **cs_lexer.c/h** and **cs_parser.c/h**: tokenization and parsing into an AST.
-  - **cs_vm.c/h**: execution engine with a small call/stack model and a global environment (`cs_env`) with lexical scoping via closures.
-- **cs_stdlib.c**: small host-facing API exposed to CupidScript via `cs_register_native` (includes `print`, `assert`, `load`/`require`, list/map helpers, string/path helpers, and `fmt`).
-- **Strings are ref-counted:** The code uses a dedicated `cs_string` type (see `cs_value.h`).  
-  *Note:* Ensure you consistently use the public API for string lifetimes.
-
----
-
-## Error Reporting
-
-Parse errors and runtime errors include `file:line:column` when available.
-
-Runtime errors also include a stack trace, for example:
-
-```text
-Runtime error at examples/stacktrace.cs:3:15: division by zero
-Stack trace:
-  at inner (examples/stacktrace.cs:8:16)
-  at outer (examples/stacktrace.cs:11:7)
-```
-
-Use `cs_vm_last_error(vm)` to retrieve the current VM error string (returns `""` if there is no error). `cs_last_error(vm)` is a compatibility getter that may return `NULL`.
-
----
-
-## Examples
-
-- `examples/test.cs` and `examples/stress.cs`: basic language coverage
-- `tests/math.cs`: operator precedence checks (uses `assert`)
-- `examples/features.cs`: lists/maps, indexing, `fmt`, string/path helpers, and `require`
-- `examples/stacktrace.cs`: demonstrates runtime stack traces
-- `examples/closures.cs`: demonstrates closures + anonymous `fn() { }`
-- `examples/time.cs`: demonstrates `now_ms()` and `sleep(ms)`
-- `examples/benchmark.cs`: quick-and-dirty performance benchmark (arith/calls/list/map/string)
-
----
-
-## Extending with Native Functions
-
-- Implement a function matching `cs_native_fn` and register it:
-
-  ```c
-  static int my_native(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
-      // Validate args, operate, and set *out as needed
-      if (argc > 0) {
-          // example: print first arg if string
-      }
-      if (out) *out = cs_nil();
-      return 0;
-  }
-  ```
-
-- Register from your bootstrap code:
-  ```c
-  cs_register_native(vm, "my.native", my_native, NULL);
-  ```
-
-- The layout for values and strings is defined in the headers.
-
-### Native error handling pattern
-
-Native functions return `0` on success. To raise an error:
-- call `cs_error(vm, "message")`
-- return non-zero from the native function
-
-This produces a runtime error and unwinds execution (with a stack trace if the call happened from script).
-
-### Callback pattern (CupidFM-style)
-
-Because functions are values, a host can accept callbacks like:
-
-```cs
-fm.on("event", fn(payload) {
-  print("event payload:", payload);
-});
-```
-
-On the C side you typically:
-- store the callback `cs_value` using `cs_value_copy`
-- later invoke it with `cs_call_value`
-- release it with `cs_value_release` when unregistering/unloading
-
----
-
-## Notes
-
-- This project is a small, embeddable scripting VM with a tiny standard library and some example natives.
-- **License:** This project is licensed under the GNU General Public License version 3 (GPLv3).  
-  See the `COPYING` file or https://www.gnu.org/licenses/gpl-3.0.html for details.
-- For a quick reference or usage guidance, check the header API in `src/cupidscript.h` and the implementation in the `src` directory.
-
----
-
-## License
-
-- **GPLv3.** This repository is licensed under the GNU General Public License version 3.  
-  See [`LICENSE`](LICENSE) or visit [https://www.gnu.org/licenses/gpl-3.0.html](https://www.gnu.org/licenses/gpl-3.0.html) for details.
-
----
-
-## Known Issues
-None currently tracked.
-
----
+- **Navigation**:
+  - **Up/Down**: Move between files
+  - **Left/Right**: Navigate to parent/child directories
+  - **F1**: Exit the application
+  - **TAB**: Switch between directory and preview windows
+  - **CONTROL+E**: Edit file in preview window
+  - **CONTROL+G**: Save file while editing
+  - **CONTROL+C**: Copy selected file to clipboard
+  - **CONTORL+V**: Paste selected file to current location
 
 ## Contributing
 
-- If you’d like to contribute:
-  - Start by adding a README-style doc
-  - Improve the build/tests
-  - Provide small example scripts in the `examples` directory
+Contributions are welcome! Please submit a pull request or open an issue for any changes.
 
----
+## License
 
-## TODO
-
-- [ ] Add cupidfm lib support
+This project is licensed under the GNU General Public License v3.0 terms.
