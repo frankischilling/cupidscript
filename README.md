@@ -68,6 +68,7 @@ Other useful scripts:
 - `bin/cupidscript examples/stress.cs`
 - `bin/cupidscript examples/stacktrace.cs`
 - `bin/cupidscript examples/trycatch.cs`
+- `bin/cupidscript examples/try_finally.cs`
 - `bin/cupidscript examples/throwtrace.cs`
 - `bin/cupidscript examples/closures.cs`
 - `bin/cupidscript examples/time.cs`
@@ -76,6 +77,10 @@ Other useful scripts:
 - `bin/cupidscript examples/gc_auto.cs`
 - `bin/cupidscript examples/safety_config.cs`
 - `bin/cupidscript examples/safety_test.cs`
+- `bin/cupidscript examples/filesystem.cs`
+- `bin/cupidscript examples/json.cs`
+- `bin/cupidscript examples/json_example.cs`
+- `bin/cupidscript examples/list_helpers.cs`
 
 ---
 
@@ -103,7 +108,8 @@ continue;
 return expr;
 
 throw expr;
-try { ... } catch (e) { ... }
+try { ... } catch (e) { ... } finally { ... }
+switch (expr) { case 1 { ... } default { ... } }
 ```
 
 Assignment rule (intentional): `let` creates new variables; plain assignment (`x = ...`) errors if `x` was never declared. This prevents silent typos like `coutn = 1`.
@@ -138,6 +144,16 @@ print(m["name"]);             // cupid
 print(keys(m));               // list of string keys
 ```
 
+List helpers:
+
+```cs
+extend(xs, ys);                // append elements
+index_of(xs, 42);              // index or -1
+sort(xs);                      // insertion (default)
+sort(xs, "quick");            // quicksort
+sort(xs, "merge");            // mergesort
+```
+
 Indexing rules:
 - `list[int]` -> element or `nil` if out of range
 - `map[string]` -> value or `nil` if missing
@@ -160,6 +176,9 @@ Current limitations (by design, for v0 simplicity):
 Stdlib provides:
 - `load("file.cs")`: executes another script file every time it’s called
 - `require("file.cs")`: executes a file once per VM and returns its `exports` map- `require_optional("file.cs")`: like `require`, but returns `nil` if file doesn't exist (no error)
+- `require_optional("file.cs")`: like `require`, but returns `nil` if file doesn't exist (no error)
+- `cwd()` / `chdir(path)` to inspect or change the VM's current directory
+
 Paths are resolved relative to the currently-running script file’s directory.
 
 Module pattern:
@@ -183,6 +202,32 @@ print(lib.hello("world"));
 - `strbuf` also exposes methods like `b.append(...)`, `b.str()`, `b.len()`, `b.clear()`.
 
 Compatibility note: CupidFM-style dotted globals still work (e.g. `fm.status("hi")`) even if `fm` is not a script value; the VM falls back to looking up a global named `"fm.status"`.
+
+---
+
+## Standard Library Highlights
+
+**Collections:**
+- `list`, `map`, `len`, `push`, `pop`, `extend`, `index_of`, `insert`, `remove`, `slice`, `keys`, `values`, `items`, `map_values`
+- `reverse`, `reversed`, `contains`, `copy`, `deepcopy`, `sort(list, [cmp], [algo])`
+
+**Strings:**
+- `str_find`, `str_replace`, `str_split`, `substr`, `join`, `to_str`, `to_int`
+- `trim/ltrim/rtrim`, `lower/upper`, `starts_with/ends_with`, `str_repeat`, `split_lines`
+
+**Filesystem & Paths:**
+- `read_file`, `write_file`, `exists`, `is_dir`, `is_file`, `list_dir`, `mkdir`, `rm`, `rename`
+- `path_join`, `path_dirname`, `path_basename`, `path_ext`, `cwd`, `chdir`
+
+**JSON:**
+- `json_parse(text)` and `json_stringify(value)`
+
+**Time & Safety:**
+- `now_ms`, `sleep`
+- `set_timeout`, `set_instruction_limit`, `get_timeout`, `get_instruction_limit`, `get_instruction_count`
+
+**Errors:**
+- `error`, `is_error`, `format_error`, `ERR` map
 
 ### Function references and closures
 
