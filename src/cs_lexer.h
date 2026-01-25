@@ -29,6 +29,7 @@ typedef enum {
     TK_THROW,
     TK_TRY,
     TK_CATCH,
+    TK_FINALLY,
     TK_TRUE,
     TK_FALSE,
     TK_NIL,

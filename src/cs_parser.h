@@ -63,7 +63,7 @@ struct ast {
         struct { char* name; ast* iterable; ast* body; } forin_stmt;
         struct { ast* init; ast* cond; ast* incr; ast* body; } for_c_style_stmt;
         struct { ast* value; } throw_stmt;
-        struct { ast* try_b; char* catch_name; ast* catch_b; } try_stmt;
+        struct { ast* try_b; char* catch_name; ast* catch_b; ast* finally_b; } try_stmt;
 
         struct { ast* cond; ast* then_b; ast* else_b; } if_stmt;
         struct { ast* cond; ast* body; } while_stmt;

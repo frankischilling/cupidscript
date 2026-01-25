@@ -84,6 +84,7 @@ static token_type keyword_type(const char* s, size_t n) {
     if (n == 5 && memcmp(s, "throw", 5) == 0) return TK_THROW;
     if (n == 3 && memcmp(s, "try", 3) == 0) return TK_TRY;
     if (n == 5 && memcmp(s, "catch", 5) == 0) return TK_CATCH;
+    if (n == 7 && memcmp(s, "finally", 7) == 0) return TK_FINALLY;
     if (n == 4 && memcmp(s, "true", 4) == 0) return TK_TRUE;
     if (n == 5 && memcmp(s, "false", 5) == 0) return TK_FALSE;
     if (n == 3 && memcmp(s, "nil", 3) == 0) return TK_NIL;

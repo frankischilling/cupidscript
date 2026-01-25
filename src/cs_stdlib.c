@@ -6,13 +6,22 @@
 #include <ctype.h>
 #include <time.h>
 #include <math.h>
-#if !defined(_WIN32)
+#include <errno.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <direct.h>
+#include <sys/stat.h>
+#else
 #include <sys/time.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <unistd.h>
 #endif
 
 // Forward declarations
 static int nf_error(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out);
 static int nf_format_error(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out);
+static int cs_value_equals(const cs_value* a, const cs_value* b);
 
 static char* cs_strdup2_local(const char* s) {
     size_t n = strlen(s ? s : "");
@@ -59,6 +68,60 @@ static const char* vm_current_dir(const cs_vm* vm) {
 static char* resolve_path_alloc(cs_vm* vm, const char* p) {
     if (is_abs_path(p)) return cs_strdup2_local(p);
     return path_join_alloc(vm_current_dir(vm), p);
+}
+
+#if defined(_WIN32)
+#define CS_STAT_STRUCT struct _stat
+#define CS_STAT_FN _stat
+#else
+#define CS_STAT_STRUCT struct stat
+#define CS_STAT_FN stat
+#endif
+
+static int fs_stat(const char* path, CS_STAT_STRUCT* st) {
+    if (!path || !st) return 0;
+    return CS_STAT_FN(path, st) == 0;
+}
+
+static int fs_is_dir(const char* path) {
+    CS_STAT_STRUCT st;
+    if (!fs_stat(path, &st)) return 0;
+#if defined(_WIN32)
+    return (st.st_mode & _S_IFDIR) != 0;
+#else
+    return S_ISDIR(st.st_mode);
+#endif
+}
+
+static int fs_is_file(const char* path) {
+    CS_STAT_STRUCT st;
+    if (!fs_stat(path, &st)) return 0;
+#if defined(_WIN32)
+    return (st.st_mode & _S_IFREG) != 0;
+#else
+    return S_ISREG(st.st_mode);
+#endif
+}
+
+static int vm_set_current_dir(cs_vm* vm, const char* path) {
+    if (!vm || !path) return 0;
+    char* dup = cs_strdup2_local(path);
+    if (!dup) return 0;
+
+    if (vm->dir_count == 0) {
+        if (vm->dir_cap == 0) {
+            vm->dir_cap = 4;
+            vm->dir_stack = (char**)malloc(sizeof(char*) * vm->dir_cap);
+            if (!vm->dir_stack) { free(dup); vm->dir_cap = 0; return 0; }
+        }
+        vm->dir_stack[0] = dup;
+        vm->dir_count = 1;
+        return 1;
+    }
+
+    free(vm->dir_stack[vm->dir_count - 1]);
+    vm->dir_stack[vm->dir_count - 1] = dup;
+    return 1;
 }
 
 static const char* value_repr(cs_value v, char* buf, size_t buf_sz) {
@@ -318,6 +381,232 @@ static int nf_pop(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value*
     return 0;
 }
 
+static int nf_extend(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (out) *out = cs_nil();
+    if (argc != 2 || argv[0].type != CS_T_LIST || argv[1].type != CS_T_LIST) {
+        cs_error(vm, "extend() requires two lists");
+        return 1;
+    }
+
+    cs_list_obj* dst = (cs_list_obj*)argv[0].as.p;
+    cs_list_obj* src = (cs_list_obj*)argv[1].as.p;
+    if (!dst || !src) return 0;
+    if (src->len == 0) return 0;
+
+    if (!list_ensure(dst, dst->len + src->len)) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+
+    for (size_t i = 0; i < src->len; i++) {
+        dst->items[dst->len++] = cs_value_copy(src->items[i]);
+    }
+
+    return 0;
+}
+
+static int nf_index_of(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_LIST) {
+        cs_error(vm, "index_of() requires a list and a value");
+        return 1;
+    }
+
+    cs_list_obj* list = (cs_list_obj*)argv[0].as.p;
+    cs_value item = argv[1];
+    for (size_t i = 0; i < list->len; i++) {
+        if (cs_value_equals(&list->items[i], &item)) {
+            *out = cs_int((int64_t)i);
+            return 0;
+        }
+    }
+
+    *out = cs_int(-1);
+    return 0;
+}
+
+static int compare_default(cs_vm* vm, cs_value a, cs_value b, int* ok) {
+    if (!ok) return 0;
+    *ok = 1;
+
+    if ((a.type == CS_T_INT || a.type == CS_T_FLOAT) && (b.type == CS_T_INT || b.type == CS_T_FLOAT)) {
+        double av = (a.type == CS_T_INT) ? (double)a.as.i : a.as.f;
+        double bv = (b.type == CS_T_INT) ? (double)b.as.i : b.as.f;
+        if (av < bv) return -1;
+        if (av > bv) return 1;
+        return 0;
+    }
+
+    if (a.type == CS_T_STR && b.type == CS_T_STR) {
+        const char* sa = cs_to_cstr(a);
+        const char* sb = cs_to_cstr(b);
+        int cmp = strcmp(sa, sb);
+        return (cmp < 0) ? -1 : (cmp > 0 ? 1 : 0);
+    }
+
+    if (a.type == CS_T_BOOL && b.type == CS_T_BOOL) {
+        return (a.as.b < b.as.b) ? -1 : (a.as.b > b.as.b ? 1 : 0);
+    }
+
+    if (a.type == CS_T_NIL && b.type == CS_T_NIL) return 0;
+
+    cs_error(vm, "sort(): incompatible types for default comparison");
+    *ok = 0;
+    return 0;
+}
+
+static int compare_with_cmp(cs_vm* vm, cs_value a, cs_value b, cs_value cmp, int* ok) {
+    if (!ok) return 0;
+    *ok = 1;
+    if (cmp.type == CS_T_NIL) return compare_default(vm, a, b, ok);
+    if (cmp.type != CS_T_FUNC && cmp.type != CS_T_NATIVE) {
+        cs_error(vm, "sort(): comparator must be a function");
+        *ok = 0;
+        return 0;
+    }
+
+    cs_value args[2];
+    args[0] = a;
+    args[1] = b;
+    cs_value ret = cs_nil();
+    if (cs_call_value(vm, cmp, 2, args, &ret) != 0) {
+        *ok = 0;
+        return 0;
+    }
+
+    int res = 0;
+    if (ret.type == CS_T_INT) res = (ret.as.i < 0) ? -1 : (ret.as.i > 0 ? 1 : 0);
+    else if (ret.type == CS_T_FLOAT) res = (ret.as.f < 0.0) ? -1 : (ret.as.f > 0.0 ? 1 : 0);
+    else if (ret.type == CS_T_BOOL) res = ret.as.b ? 1 : 0;
+    else {
+        cs_error(vm, "sort(): comparator must return int/float/bool");
+        *ok = 0;
+    }
+    cs_value_release(ret);
+    return res;
+}
+
+static int sort_insertion(cs_vm* vm, cs_list_obj* list, cs_value cmp) {
+    if (!list || list->len < 2) return 0;
+    for (size_t i = 1; i < list->len; i++) {
+        cs_value key = list->items[i];
+        size_t j = i;
+        while (j > 0) {
+            int ok = 1;
+            int cmp_res = compare_with_cmp(vm, list->items[j - 1], key, cmp, &ok);
+            if (!ok) return 1;
+            if (cmp_res <= 0) break;
+            list->items[j] = list->items[j - 1];
+            j--;
+        }
+        list->items[j] = key;
+    }
+    return 0;
+}
+
+static int sort_quick_impl(cs_vm* vm, cs_list_obj* list, cs_value cmp, int64_t lo, int64_t hi) {
+    if (lo >= hi) return 0;
+    cs_value pivot = list->items[hi];
+    int64_t i = lo;
+    for (int64_t j = lo; j < hi; j++) {
+        int ok = 1;
+        int cmp_res = compare_with_cmp(vm, list->items[j], pivot, cmp, &ok);
+        if (!ok) return 1;
+        if (cmp_res <= 0) {
+            cs_value tmp = list->items[i];
+            list->items[i] = list->items[j];
+            list->items[j] = tmp;
+            i++;
+        }
+    }
+    cs_value tmp = list->items[i];
+    list->items[i] = list->items[hi];
+    list->items[hi] = tmp;
+
+    if (sort_quick_impl(vm, list, cmp, lo, i - 1) != 0) return 1;
+    if (sort_quick_impl(vm, list, cmp, i + 1, hi) != 0) return 1;
+    return 0;
+}
+
+static int sort_quick(cs_vm* vm, cs_list_obj* list, cs_value cmp) {
+    if (!list || list->len < 2) return 0;
+    return sort_quick_impl(vm, list, cmp, 0, (int64_t)list->len - 1);
+}
+
+static int sort_merge_impl(cs_vm* vm, cs_list_obj* list, cs_value cmp, cs_value* tmp, size_t lo, size_t hi) {
+    if (hi - lo <= 1) return 0;
+    size_t mid = lo + (hi - lo) / 2;
+    if (sort_merge_impl(vm, list, cmp, tmp, lo, mid) != 0) return 1;
+    if (sort_merge_impl(vm, list, cmp, tmp, mid, hi) != 0) return 1;
+
+    size_t i = lo, j = mid, k = 0;
+    while (i < mid && j < hi) {
+        int ok = 1;
+        int cmp_res = compare_with_cmp(vm, list->items[i], list->items[j], cmp, &ok);
+        if (!ok) return 1;
+        if (cmp_res <= 0) tmp[k++] = list->items[i++];
+        else tmp[k++] = list->items[j++];
+    }
+    while (i < mid) tmp[k++] = list->items[i++];
+    while (j < hi) tmp[k++] = list->items[j++];
+    for (size_t t = 0; t < k; t++) list->items[lo + t] = tmp[t];
+    return 0;
+}
+
+static int sort_merge(cs_vm* vm, cs_list_obj* list, cs_value cmp) {
+    if (!list || list->len < 2) return 0;
+    cs_value* tmp = (cs_value*)malloc(sizeof(cs_value) * list->len);
+    if (!tmp) { cs_error(vm, "out of memory"); return 1; }
+    int rc = sort_merge_impl(vm, list, cmp, tmp, 0, list->len);
+    free(tmp);
+    return rc;
+}
+
+static int nf_sort(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1 || argv[0].type != CS_T_LIST) {
+        cs_error(vm, "sort() requires a list");
+        return 1;
+    }
+
+    cs_value cmp = cs_nil();
+    const char* algo = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (argv[i].type == CS_T_STR && !algo) {
+            algo = cs_to_cstr(argv[i]);
+            continue;
+        }
+        if ((argv[i].type == CS_T_FUNC || argv[i].type == CS_T_NATIVE || argv[i].type == CS_T_NIL) && cmp.type == CS_T_NIL) {
+            cmp = argv[i];
+            continue;
+        }
+        cs_error(vm, "sort() expects optional comparator and/or algorithm name");
+        return 1;
+    }
+
+    if (!algo) algo = "insertion";
+
+    cs_list_obj* list = (cs_list_obj*)argv[0].as.p;
+    if (!list || list->len < 2) { *out = cs_nil(); return 0; }
+
+    int rc = 0;
+    if (strcmp(algo, "insertion") == 0) rc = sort_insertion(vm, list, cmp);
+    else if (strcmp(algo, "quick") == 0 || strcmp(algo, "quicksort") == 0) rc = sort_quick(vm, list, cmp);
+    else if (strcmp(algo, "merge") == 0 || strcmp(algo, "mergesort") == 0) rc = sort_merge(vm, list, cmp);
+    else {
+        cs_error(vm, "sort(): unknown algorithm");
+        return 1;
+    }
+
+    if (rc != 0) return 1;
+    *out = cs_nil();
+    return 0;
+}
+
 static int nf_mget(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
     (void)vm; (void)ud;
     if (!out) return 0;
@@ -518,6 +807,248 @@ static int nf_path_ext(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_v
     return 0;
 }
 
+static int nf_read_file(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_nil(); return 0; }
+
+    const char* path = ((cs_string*)argv[0].as.p)->data;
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) { cs_error(vm, "out of memory"); return 1; }
+
+    FILE* f = fopen(resolved, "rb");
+    free(resolved);
+    if (!f) { *out = cs_nil(); return 0; }
+
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); *out = cs_nil(); return 0; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); *out = cs_nil(); return 0; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); *out = cs_nil(); return 0; }
+
+    size_t n = (size_t)sz;
+    char* buf = (char*)malloc(n + 1);
+    if (!buf) { fclose(f); cs_error(vm, "out of memory"); return 1; }
+    size_t r = fread(buf, 1, n, f);
+    fclose(f);
+    if (r != n) { free(buf); *out = cs_nil(); return 0; }
+    buf[n] = 0;
+    *out = cs_str_take(vm, buf, (uint64_t)n);
+    return 0;
+}
+
+static int nf_write_file(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+
+    const char* path = ((cs_string*)argv[0].as.p)->data;
+    const char* data = ((cs_string*)argv[1].as.p)->data;
+    size_t len = ((cs_string*)argv[1].as.p)->len;
+
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) { cs_error(vm, "out of memory"); return 1; }
+
+    FILE* f = fopen(resolved, "wb");
+    free(resolved);
+    if (!f) { *out = cs_bool(0); return 0; }
+
+    size_t w = fwrite(data, 1, len, f);
+    fclose(f);
+    *out = cs_bool(w == len);
+    return 0;
+}
+
+static int nf_exists(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+
+    const char* path = ((cs_string*)argv[0].as.p)->data;
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) { cs_error(vm, "out of memory"); return 1; }
+
+    CS_STAT_STRUCT st;
+    int ok = fs_stat(resolved, &st);
+    free(resolved);
+    *out = cs_bool(ok);
+    return 0;
+}
+
+static int nf_is_dir(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+
+    const char* path = ((cs_string*)argv[0].as.p)->data;
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) { cs_error(vm, "out of memory"); return 1; }
+    int ok = fs_is_dir(resolved);
+    free(resolved);
+    *out = cs_bool(ok);
+    return 0;
+}
+
+static int nf_is_file(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+
+    const char* path = ((cs_string*)argv[0].as.p)->data;
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) { cs_error(vm, "out of memory"); return 1; }
+    int ok = fs_is_file(resolved);
+    free(resolved);
+    *out = cs_bool(ok);
+    return 0;
+}
+
+static int nf_list_dir(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_nil(); return 0; }
+
+    const char* path = ((cs_string*)argv[0].as.p)->data;
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) { cs_error(vm, "out of memory"); return 1; }
+
+    cs_value listv = cs_list(vm);
+    if (listv.type != CS_T_LIST) { free(resolved); *out = cs_nil(); return 0; }
+
+#if defined(_WIN32)
+    size_t n = strlen(resolved);
+    const char* suffix = (n > 0 && (resolved[n - 1] == '/' || resolved[n - 1] == '\\')) ? "*" : "\\*";
+    size_t sn = strlen(suffix);
+    char* pattern = (char*)malloc(n + sn + 1);
+    if (!pattern) { free(resolved); cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+    memcpy(pattern, resolved, n);
+    memcpy(pattern + n, suffix, sn + 1);
+
+    WIN32_FIND_DATAA data;
+    HANDLE h = FindFirstFileA(pattern, &data);
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) { free(resolved); cs_value_release(listv); *out = cs_nil(); return 0; }
+    do {
+        const char* name = data.cFileName;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        cs_value sv = cs_str(vm, name);
+        if (cs_list_push(listv, sv) != 0) { cs_value_release(sv); FindClose(h); free(resolved); cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+        cs_value_release(sv);
+    } while (FindNextFileA(h, &data));
+    FindClose(h);
+#else
+    DIR* dir = opendir(resolved);
+    if (!dir) { free(resolved); cs_value_release(listv); *out = cs_nil(); return 0; }
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != NULL) {
+        const char* name = ent->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        cs_value sv = cs_str(vm, name);
+        if (cs_list_push(listv, sv) != 0) { cs_value_release(sv); closedir(dir); free(resolved); cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+        cs_value_release(sv);
+    }
+    closedir(dir);
+#endif
+
+    free(resolved);
+    *out = listv;
+    return 0;
+}
+
+static int nf_mkdir(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+
+    const char* path = ((cs_string*)argv[0].as.p)->data;
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) { cs_error(vm, "out of memory"); return 1; }
+
+    if (fs_is_dir(resolved)) { free(resolved); *out = cs_bool(1); return 0; }
+
+#if defined(_WIN32)
+    int ok = _mkdir(resolved) == 0;
+#else
+    int ok = mkdir(resolved, 0777) == 0;
+#endif
+    free(resolved);
+    *out = cs_bool(ok);
+    return 0;
+}
+
+static int nf_rm(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+
+    const char* path = ((cs_string*)argv[0].as.p)->data;
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) { cs_error(vm, "out of memory"); return 1; }
+
+    int ok = 0;
+    if (fs_is_dir(resolved)) {
+#if defined(_WIN32)
+        ok = _rmdir(resolved) == 0;
+#else
+        ok = rmdir(resolved) == 0;
+#endif
+    } else {
+        ok = remove(resolved) == 0;
+    }
+
+    free(resolved);
+    *out = cs_bool(ok);
+    return 0;
+}
+
+static int nf_rename(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+
+    const char* a = ((cs_string*)argv[0].as.p)->data;
+    const char* b = ((cs_string*)argv[1].as.p)->data;
+
+    char* ra = resolve_path_alloc(vm, a);
+    char* rb = resolve_path_alloc(vm, b);
+    if (!ra || !rb) {
+        free(ra);
+        free(rb);
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+
+    int ok = rename(ra, rb) == 0;
+    free(ra);
+    free(rb);
+    *out = cs_bool(ok);
+    return 0;
+}
+
+static int nf_cwd(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    (void)argc;
+    (void)argv;
+    if (!out) return 0;
+    *out = cs_str(vm, vm_current_dir(vm));
+    return 0;
+}
+
+static int nf_chdir(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+
+    const char* path = ((cs_string*)argv[0].as.p)->data;
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) { cs_error(vm, "out of memory"); return 1; }
+
+    if (!fs_is_dir(resolved)) { free(resolved); *out = cs_bool(0); return 0; }
+    int ok = vm_set_current_dir(vm, resolved);
+    free(resolved);
+    *out = cs_bool(ok);
+    return 0;
+}
+
 static int sb_append(char** buf, size_t* len, size_t* cap, const char* s, size_t n) {
     if (!buf || !len || !cap) return 0;
     if (*len + n + 1 > *cap) {
@@ -532,6 +1063,349 @@ static int sb_append(char** buf, size_t* len, size_t* cap, const char* s, size_t
     *len += n;
     (*buf)[*len] = 0;
     return 1;
+}
+
+// ---------- JSON helpers ----------
+typedef struct {
+    const char* s;
+    size_t len;
+    size_t pos;
+    cs_vm* vm;
+} json_parser;
+
+static void json_skip_ws(json_parser* p) {
+    while (p->pos < p->len) {
+        char c = p->s[p->pos];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { p->pos++; continue; }
+        break;
+    }
+}
+
+static int json_match(json_parser* p, const char* lit) {
+    size_t n = strlen(lit);
+    if (p->pos + n > p->len) return 0;
+    if (memcmp(p->s + p->pos, lit, n) != 0) return 0;
+    p->pos += n;
+    return 1;
+}
+
+static int json_hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static cs_value json_parse_value(json_parser* p, int* ok);
+
+static cs_value json_parse_string(json_parser* p, int* ok) {
+    if (!ok) return cs_nil();
+    *ok = 1;
+    if (p->pos >= p->len || p->s[p->pos] != '"') { *ok = 0; return cs_nil(); }
+    p->pos++;
+
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+    while (p->pos < p->len) {
+        char c = p->s[p->pos++];
+        if (c == '"') break;
+        if ((unsigned char)c < 0x20) { *ok = 0; break; }
+        if (c == '\\') {
+            if (p->pos >= p->len) { *ok = 0; break; }
+            char e = p->s[p->pos++];
+            switch (e) {
+                case '"': c = '"'; break;
+                case '\\': c = '\\'; break;
+                case '/': c = '/'; break;
+                case 'b': c = '\b'; break;
+                case 'f': c = '\f'; break;
+                case 'n': c = '\n'; break;
+                case 'r': c = '\r'; break;
+                case 't': c = '\t'; break;
+                case 'u': {
+                    if (p->pos + 4 > p->len) { *ok = 0; break; }
+                    int h1 = json_hex_val(p->s[p->pos++]);
+                    int h2 = json_hex_val(p->s[p->pos++]);
+                    int h3 = json_hex_val(p->s[p->pos++]);
+                    int h4 = json_hex_val(p->s[p->pos++]);
+                    if (h1 < 0 || h2 < 0 || h3 < 0 || h4 < 0) { *ok = 0; break; }
+                    int code = (h1 << 12) | (h2 << 8) | (h3 << 4) | h4;
+                    if (code < 0x80) {
+                        c = (char)code;
+                    } else {
+                        c = '?';
+                    }
+                    break;
+                }
+                default:
+                    c = e;
+                    break;
+            }
+        }
+        if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; break; }
+    }
+
+    if (!*ok) { free(buf); return cs_nil(); }
+    if (!buf) {
+        char* empty = (char*)malloc(1);
+        if (!empty) { *ok = 0; return cs_nil(); }
+        empty[0] = 0;
+        return cs_str_take(p->vm, empty, 0);
+    }
+    return cs_str_take(p->vm, buf, (uint64_t)len);
+}
+
+static cs_value json_parse_number(json_parser* p, int* ok) {
+    if (!ok) return cs_nil();
+    *ok = 1;
+    size_t start = p->pos;
+    if (p->pos < p->len && (p->s[p->pos] == '-' || p->s[p->pos] == '+')) p->pos++;
+    while (p->pos < p->len && isdigit((unsigned char)p->s[p->pos])) p->pos++;
+    if (p->pos < p->len && p->s[p->pos] == '.') {
+        p->pos++;
+        while (p->pos < p->len && isdigit((unsigned char)p->s[p->pos])) p->pos++;
+    }
+    if (p->pos < p->len && (p->s[p->pos] == 'e' || p->s[p->pos] == 'E')) {
+        p->pos++;
+        if (p->pos < p->len && (p->s[p->pos] == '+' || p->s[p->pos] == '-')) p->pos++;
+        while (p->pos < p->len && isdigit((unsigned char)p->s[p->pos])) p->pos++;
+    }
+
+    size_t n = p->pos - start;
+    if (n == 0) { *ok = 0; return cs_nil(); }
+    int is_float = 0;
+    for (size_t i = start; i < p->pos; i++) {
+        char c = p->s[i];
+        if (c == '.' || c == 'e' || c == 'E') { is_float = 1; break; }
+    }
+
+    if (!is_float) {
+        errno = 0;
+        long long v = strtoll(p->s + start, NULL, 10);
+        if (errno == 0) return cs_int((int64_t)v);
+    }
+
+    errno = 0;
+    double d = strtod(p->s + start, NULL);
+    if (errno != 0) { *ok = 0; return cs_nil(); }
+    return cs_float(d);
+}
+
+static cs_value json_parse_array(json_parser* p, int* ok) {
+    if (!ok) return cs_nil();
+    *ok = 1;
+    if (p->pos >= p->len || p->s[p->pos] != '[') { *ok = 0; return cs_nil(); }
+    p->pos++;
+    json_skip_ws(p);
+
+    cs_value listv = cs_list(p->vm);
+    if (listv.type != CS_T_LIST) { *ok = 0; return cs_nil(); }
+
+    if (p->pos < p->len && p->s[p->pos] == ']') { p->pos++; return listv; }
+
+    while (p->pos < p->len) {
+        cs_value v = json_parse_value(p, ok);
+        if (!*ok) { cs_value_release(listv); return cs_nil(); }
+        if (cs_list_push(listv, v) != 0) { cs_value_release(v); cs_value_release(listv); cs_error(p->vm, "out of memory"); *ok = 0; return cs_nil(); }
+        cs_value_release(v);
+
+        json_skip_ws(p);
+        if (p->pos < p->len && p->s[p->pos] == ',') { p->pos++; json_skip_ws(p); continue; }
+        if (p->pos < p->len && p->s[p->pos] == ']') { p->pos++; return listv; }
+        break;
+    }
+
+    cs_value_release(listv);
+    *ok = 0;
+    return cs_nil();
+}
+
+static cs_value json_parse_object(json_parser* p, int* ok) {
+    if (!ok) return cs_nil();
+    *ok = 1;
+    if (p->pos >= p->len || p->s[p->pos] != '{') { *ok = 0; return cs_nil(); }
+    p->pos++;
+    json_skip_ws(p);
+
+    cs_value mapv = cs_map(p->vm);
+    if (mapv.type != CS_T_MAP) { *ok = 0; return cs_nil(); }
+
+    if (p->pos < p->len && p->s[p->pos] == '}') { p->pos++; return mapv; }
+
+    while (p->pos < p->len) {
+        cs_value keyv = json_parse_string(p, ok);
+        if (!*ok || keyv.type != CS_T_STR) { cs_value_release(mapv); return cs_nil(); }
+
+        json_skip_ws(p);
+        if (p->pos >= p->len || p->s[p->pos] != ':') { cs_value_release(keyv); cs_value_release(mapv); *ok = 0; return cs_nil(); }
+        p->pos++;
+        json_skip_ws(p);
+
+        cs_value val = json_parse_value(p, ok);
+        if (!*ok) { cs_value_release(keyv); cs_value_release(mapv); return cs_nil(); }
+
+        if (cs_map_set(mapv, cs_to_cstr(keyv), val) != 0) {
+            cs_value_release(keyv);
+            cs_value_release(val);
+            cs_value_release(mapv);
+            cs_error(p->vm, "out of memory");
+            *ok = 0;
+            return cs_nil();
+        }
+        cs_value_release(keyv);
+        cs_value_release(val);
+
+        json_skip_ws(p);
+        if (p->pos < p->len && p->s[p->pos] == ',') { p->pos++; json_skip_ws(p); continue; }
+        if (p->pos < p->len && p->s[p->pos] == '}') { p->pos++; return mapv; }
+        break;
+    }
+
+    cs_value_release(mapv);
+    *ok = 0;
+    return cs_nil();
+}
+
+static cs_value json_parse_value(json_parser* p, int* ok) {
+    if (!ok) return cs_nil();
+    *ok = 1;
+    json_skip_ws(p);
+    if (p->pos >= p->len) { *ok = 0; return cs_nil(); }
+    char c = p->s[p->pos];
+
+    if (c == '"') return json_parse_string(p, ok);
+    if (c == '[') return json_parse_array(p, ok);
+    if (c == '{') return json_parse_object(p, ok);
+    if (c == 't') { if (json_match(p, "true")) return cs_bool(1); }
+    if (c == 'f') { if (json_match(p, "false")) return cs_bool(0); }
+    if (c == 'n') { if (json_match(p, "null")) return cs_nil(); }
+    if (c == '-' || c == '+' || isdigit((unsigned char)c)) return json_parse_number(p, ok);
+
+    *ok = 0;
+    return cs_nil();
+}
+
+static int json_append_escaped(char** buf, size_t* len, size_t* cap, const char* s) {
+    if (!buf || !len || !cap) return 0;
+    if (!sb_append(buf, len, cap, "\"", 1)) return 0;
+    for (size_t i = 0; s && s[i]; i++) {
+        char c = s[i];
+        switch (c) {
+            case '"': if (!sb_append(buf, len, cap, "\\\"", 2)) return 0; break;
+            case '\\': if (!sb_append(buf, len, cap, "\\\\", 2)) return 0; break;
+            case '\b': if (!sb_append(buf, len, cap, "\\b", 2)) return 0; break;
+            case '\f': if (!sb_append(buf, len, cap, "\\f", 2)) return 0; break;
+            case '\n': if (!sb_append(buf, len, cap, "\\n", 2)) return 0; break;
+            case '\r': if (!sb_append(buf, len, cap, "\\r", 2)) return 0; break;
+            case '\t': if (!sb_append(buf, len, cap, "\\t", 2)) return 0; break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char tmp[7];
+                    snprintf(tmp, sizeof(tmp), "\\u%04x", (unsigned char)c);
+                    if (!sb_append(buf, len, cap, tmp, 6)) return 0;
+                } else {
+                    if (!sb_append(buf, len, cap, &c, 1)) return 0;
+                }
+                break;
+        }
+    }
+    if (!sb_append(buf, len, cap, "\"", 1)) return 0;
+    return 1;
+}
+
+static int json_stringify_value(cs_vm* vm, cs_value v, char** buf, size_t* len, size_t* cap, void** stack, size_t depth) {
+    switch (v.type) {
+        case CS_T_NIL:
+            return sb_append(buf, len, cap, "null", 4);
+        case CS_T_BOOL:
+            return sb_append(buf, len, cap, v.as.b ? "true" : "false", v.as.b ? 4 : 5);
+        case CS_T_INT: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)v.as.i);
+            return sb_append(buf, len, cap, tmp, (size_t)n);
+        }
+        case CS_T_FLOAT: {
+            char tmp[64];
+            int n = snprintf(tmp, sizeof(tmp), "%.17g", v.as.f);
+            return sb_append(buf, len, cap, tmp, (size_t)n);
+        }
+        case CS_T_STR:
+            return json_append_escaped(buf, len, cap, cs_to_cstr(v));
+        case CS_T_LIST: {
+            cs_list_obj* list = (cs_list_obj*)v.as.p;
+            for (size_t i = 0; i < depth; i++) if (stack[i] == list) { cs_error(vm, "json_stringify(): cycle detected"); return 0; }
+            stack[depth] = list;
+            if (!sb_append(buf, len, cap, "[", 1)) return 0;
+            for (size_t i = 0; i < list->len; i++) {
+                if (i > 0 && !sb_append(buf, len, cap, ",", 1)) return 0;
+                if (!json_stringify_value(vm, list->items[i], buf, len, cap, stack, depth + 1)) return 0;
+            }
+            return sb_append(buf, len, cap, "]", 1);
+        }
+        case CS_T_MAP: {
+            cs_map_obj* m = (cs_map_obj*)v.as.p;
+            for (size_t i = 0; i < depth; i++) if (stack[i] == m) { cs_error(vm, "json_stringify(): cycle detected"); return 0; }
+            stack[depth] = m;
+            if (!sb_append(buf, len, cap, "{", 1)) return 0;
+            int first = 1;
+            for (size_t i = 0; i < m->cap; i++) {
+                if (!m->entries[i].key) continue;
+                if (!first && !sb_append(buf, len, cap, ",", 1)) return 0;
+                first = 0;
+                if (!json_append_escaped(buf, len, cap, m->entries[i].key->data)) return 0;
+                if (!sb_append(buf, len, cap, ":", 1)) return 0;
+                if (!json_stringify_value(vm, m->entries[i].val, buf, len, cap, stack, depth + 1)) return 0;
+            }
+            return sb_append(buf, len, cap, "}", 1);
+        }
+        default:
+            cs_error(vm, "json_stringify(): unsupported value type");
+            return 0;
+    }
+}
+
+static int nf_json_parse(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_nil(); return 0; }
+
+    const cs_string* s = (const cs_string*)argv[0].as.p;
+    json_parser p;
+    p.s = s ? s->data : "";
+    p.len = s ? s->len : 0;
+    p.pos = 0;
+    p.vm = vm;
+
+    int ok = 1;
+    cs_value v = json_parse_value(&p, &ok);
+    if (!ok) { cs_error(vm, "json_parse(): invalid JSON"); return 1; }
+    json_skip_ws(&p);
+    if (p.pos != p.len) { cs_value_release(v); cs_error(vm, "json_parse(): trailing characters"); return 1; }
+    *out = v;
+    return 0;
+}
+
+static int nf_json_stringify(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1) { *out = cs_nil(); return 0; }
+
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+    void* stack[128];
+    if (!json_stringify_value(vm, argv[0], &buf, &len, &cap, stack, 0)) {
+        free(buf);
+        return 1;
+    }
+    if (!buf) {
+        char* empty = (char*)malloc(1);
+        if (!empty) { cs_error(vm, "out of memory"); return 1; }
+        empty[0] = 0;
+        *out = cs_str_take(vm, empty, 0);
+        return 0;
+    }
+    *out = cs_str_take(vm, buf, (uint64_t)len);
+    return 0;
 }
 
 static int nf_fmt(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
@@ -1362,6 +2236,49 @@ static int nf_str_repeat(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs
     return 0;
 }
 
+static int nf_split_lines(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_nil(); return 0; }
+
+    const cs_string* s = (const cs_string*)argv[0].as.p;
+    const char* data = s ? s->data : "";
+    size_t n = s ? s->len : 0;
+
+    cs_value listv = cs_list(vm);
+    if (listv.type != CS_T_LIST) { *out = cs_nil(); return 0; }
+
+    size_t start = 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = data[i];
+        if (c == '\n' || c == '\r') {
+            size_t line_len = i - start;
+            char* buf = (char*)malloc(line_len + 1);
+            if (!buf) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+            if (line_len) memcpy(buf, data + start, line_len);
+            buf[line_len] = 0;
+            cs_value sv = cs_str_take(vm, buf, (uint64_t)line_len);
+            if (cs_list_push(listv, sv) != 0) { cs_value_release(sv); cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+            cs_value_release(sv);
+
+            if (c == '\r' && i + 1 < n && data[i + 1] == '\n') i++;
+            start = i + 1;
+        }
+    }
+
+    size_t tail_len = (start <= n) ? (n - start) : 0;
+    char* tbuf = (char*)malloc(tail_len + 1);
+    if (!tbuf) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+    if (tail_len) memcpy(tbuf, data + start, tail_len);
+    tbuf[tail_len] = 0;
+    cs_value tv = cs_str_take(vm, tbuf, (uint64_t)tail_len);
+    if (cs_list_push(listv, tv) != 0) { cs_value_release(tv); cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+    cs_value_release(tv);
+
+    *out = listv;
+    return 0;
+}
+
 // Data quality-of-life functions
 static int nf_map_values(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
     (void)ud;
@@ -1715,6 +2632,9 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "len",    nf_len,    NULL);
     cs_register_native(vm, "push",   nf_push,   NULL);
     cs_register_native(vm, "pop",    nf_pop,    NULL);
+    cs_register_native(vm, "extend", nf_extend, NULL);
+    cs_register_native(vm, "index_of", nf_index_of, NULL);
+    cs_register_native(vm, "sort",   nf_sort,   NULL);
     cs_register_native(vm, "mget",   nf_mget,   NULL);
     cs_register_native(vm, "mset",   nf_mset,   NULL);
     cs_register_native(vm, "mhas",   nf_mhas,   NULL);
@@ -1759,6 +2679,19 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "path_dirname", nf_path_dirname, NULL);
     cs_register_native(vm, "path_basename", nf_path_basename, NULL);
     cs_register_native(vm, "path_ext",    nf_path_ext,    NULL);
+    cs_register_native(vm, "json_parse",    nf_json_parse,    NULL);
+    cs_register_native(vm, "json_stringify", nf_json_stringify, NULL);
+    cs_register_native(vm, "read_file",  nf_read_file,  NULL);
+    cs_register_native(vm, "write_file", nf_write_file, NULL);
+    cs_register_native(vm, "exists",     nf_exists,     NULL);
+    cs_register_native(vm, "is_dir",     nf_is_dir,     NULL);
+    cs_register_native(vm, "is_file",    nf_is_file,    NULL);
+    cs_register_native(vm, "list_dir",   nf_list_dir,   NULL);
+    cs_register_native(vm, "mkdir",      nf_mkdir,      NULL);
+    cs_register_native(vm, "rm",         nf_rm,         NULL);
+    cs_register_native(vm, "rename",     nf_rename,     NULL);
+    cs_register_native(vm, "cwd",        nf_cwd,        NULL);
+    cs_register_native(vm, "chdir",      nf_chdir,      NULL);
     cs_register_native(vm, "fmt",         nf_fmt,         NULL);
     cs_register_native(vm, "now_ms",      nf_now_ms,      NULL);
     cs_register_native(vm, "sleep",       nf_sleep,       NULL);
@@ -1772,6 +2705,16 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "str_startswith", nf_str_startswith, NULL);
     cs_register_native(vm, "str_endswith",   nf_str_endswith,   NULL);
     cs_register_native(vm, "str_repeat",     nf_str_repeat,     NULL);
+    cs_register_native(vm, "split_lines",    nf_split_lines,    NULL);
+
+    // String ergonomics aliases
+    cs_register_native(vm, "trim",        nf_str_trim,       NULL);
+    cs_register_native(vm, "ltrim",       nf_str_ltrim,      NULL);
+    cs_register_native(vm, "rtrim",       nf_str_rtrim,      NULL);
+    cs_register_native(vm, "lower",       nf_str_lower,      NULL);
+    cs_register_native(vm, "upper",       nf_str_upper,      NULL);
+    cs_register_native(vm, "starts_with", nf_str_startswith, NULL);
+    cs_register_native(vm, "ends_with",   nf_str_endswith,   NULL);
     
     // Data quality-of-life
     cs_register_native(vm, "map_values", nf_map_values, NULL);

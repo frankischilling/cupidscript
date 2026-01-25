@@ -2190,27 +2190,40 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
             size_t base_depth = vm ? vm->frame_count : 0;
             exec_result tr = exec_stmt(vm, env, s->as.try_stmt.try_b);
             if (!tr.ok) return tr;
-            if (!tr.did_throw) return tr;
+            exec_result result = tr;
 
-            if (vm && vm->frame_count > base_depth) vm->frame_count = base_depth;
-            cs_env* catchenv = env_new(env);
-            if (!catchenv) {
+            if (tr.did_throw) {
+                if (vm && vm->frame_count > base_depth) vm->frame_count = base_depth;
+                cs_env* catchenv = env_new(env);
+                if (!catchenv) {
+                    cs_value_release(tr.thrown);
+                    vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                    tr.ok = 0;
+                    tr.did_throw = 0;
+                    tr.thrown = cs_nil();
+                    return tr;
+                }
+
+                env_set_here(catchenv, s->as.try_stmt.catch_name, tr.thrown);
                 cs_value_release(tr.thrown);
-                vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
-                tr.ok = 0;
-                tr.did_throw = 0;
                 tr.thrown = cs_nil();
-                return tr;
+                tr.did_throw = 0;
+
+                exec_result cr = exec_stmt(vm, catchenv, s->as.try_stmt.catch_b);
+                env_decref(catchenv);
+                result = cr;
             }
 
-            env_set_here(catchenv, s->as.try_stmt.catch_name, tr.thrown);
-            cs_value_release(tr.thrown);
-            tr.thrown = cs_nil();
-            tr.did_throw = 0;
+            if (s->as.try_stmt.finally_b) {
+                exec_result fr = exec_stmt(vm, env, s->as.try_stmt.finally_b);
+                if (!fr.ok || fr.did_return || fr.did_break || fr.did_continue || fr.did_throw) {
+                    cs_value_release(result.ret);
+                    cs_value_release(result.thrown);
+                    return fr;
+                }
+            }
 
-            exec_result cr = exec_stmt(vm, catchenv, s->as.try_stmt.catch_b);
-            env_decref(catchenv);
-            return cr;
+            return result;
         }
 
         case N_EXPR_STMT: {

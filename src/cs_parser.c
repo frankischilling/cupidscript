@@ -602,6 +602,11 @@ static ast* parse_stmt(parser* P) {
         next(P);
         expect(P, TK_RPAREN, "expected ')'");
         n->as.try_stmt.catch_b = parse_block(P);
+        if (accept(P, TK_FINALLY)) {
+            n->as.try_stmt.finally_b = parse_block(P);
+        } else {
+            n->as.try_stmt.finally_b = NULL;
+        }
         return n;
     }
 
@@ -876,6 +881,7 @@ void ast_free(ast* node) {
             ast_free(node->as.try_stmt.try_b);
             free(node->as.try_stmt.catch_name);
             ast_free(node->as.try_stmt.catch_b);
+            ast_free(node->as.try_stmt.finally_b);
             break;
         case N_IF:
             ast_free(node->as.if_stmt.cond);
