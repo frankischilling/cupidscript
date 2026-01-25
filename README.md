@@ -20,6 +20,49 @@ make
 bin/cupidscript examples/features.cs
 ```
 
+## Tests
+
+Tests are plain `.cs` scripts under `tests/` that use the stdlib `assert(...)` function.
+
+```sh
+make test
+```
+
+### Writing New Tests
+
+1. **Create a new test file** in `tests/` with a `.cs` extension (e.g. `tests/my_feature.cs`).
+2. **Write assertions** with `assert(condition, "message")` so failures are clear.
+3. **Print a success marker** at the end (optional, but helps when reading logs).
+
+Example:
+
+```cs
+// tests/my_feature.cs
+let x = 1 + 2;
+assert(x == 3, "basic math");
+print("my_feature ok");
+```
+
+#### Negative Tests (Expected Failures)
+
+If a test should *fail* (e.g. parse/runtime errors), add this header at the top:
+
+```cs
+// EXPECT_FAIL
+```
+
+Example:
+
+```cs
+// tests/negative_example.cs
+// EXPECT_FAIL
+assert(false, "should fail");
+```
+
+#### Helper Files
+
+Files prefixed with `_` are ignored by the test runner. Use these for shared helpers or fixtures.
+
 Other useful scripts:
 - `bin/cupidscript examples/test.cs`
 - `bin/cupidscript examples/stress.cs`

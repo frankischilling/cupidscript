@@ -12,7 +12,7 @@ static char advance(lexer* L) {
     return c;
 }
 
-static void skip_ws_and_comments(lexer* L) {
+static int skip_ws_and_comments(lexer* L, const char** err_start, size_t* err_len, int* err_line, int* err_col) {
     for (;;) {
         char c = peek(L);
         // whitespace
@@ -27,15 +27,29 @@ static void skip_ws_and_comments(lexer* L) {
         }
         // /* comment */
         if (c == '/' && peek2(L) == '*') {
+            const char* start = &L->src[L->pos];
+            int line = L->line;
+            int col = L->col;
             advance(L); advance(L);
+            int closed = 0;
             while (peek(L)) {
-                if (peek(L) == '*' && peek2(L) == '/') { advance(L); advance(L); break; }
+                if (peek(L) == '*' && peek2(L) == '/') { advance(L); advance(L); closed = 1; break; }
                 advance(L);
+            }
+            if (!closed) {
+                if (err_start) *err_start = start;
+                if (err_len) *err_len = (size_t)(&L->src[L->pos] - start);
+                if (err_line) *err_line = line;
+                if (err_col) *err_col = col;
+                return 0;
             }
             continue;
         }
         break;
     }
+
+    (void)err_start; (void)err_len; (void)err_line; (void)err_col;
+    return 1;
 }
 
 static token make_tok(lexer* L, token_type t, const char* start, size_t len, long long iv, int line, int col) {
@@ -82,7 +96,13 @@ void lex_init(lexer* L, const char* src) {
 }
 
 token lex_next(lexer* L) {
-    skip_ws_and_comments(L);
+    const char* err_start = NULL;
+    size_t err_len = 0;
+    int err_line = 0;
+    int err_col = 0;
+    if (!skip_ws_and_comments(L, &err_start, &err_len, &err_line, &err_col)) {
+        return make_tok(L, TK_ERR, err_start ? err_start : &L->src[L->pos], err_len, 0, err_line, err_col);
+    }
     const char* start = &L->src[L->pos];
     int line = L->line;
     int col  = L->col;

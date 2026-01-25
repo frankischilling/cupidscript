@@ -79,37 +79,155 @@ static const char* vm_intern_source(cs_vm* vm, const char* name) {
     return dup;
 }
 
-// Normalize path to canonical form (resolves ./ and ../, converts to forward slashes)
+// Normalize path to canonical-ish form:
+// - converts backslashes to '/'
+// - collapses repeated slashes
+// - resolves '.' and '..' segments (purely lexically)
+// This is used for module caching: './a.cs' and 'x/../a.cs' should map to the same key.
 static char* path_normalize_alloc(const char* path) {
     if (!path) return NULL;
-    
+
     size_t len = strlen(path);
-    char* normalized = (char*)malloc(len + 1);
-    if (!normalized) return NULL;
-    
-    // Convert backslashes to forward slashes
+    if (len == 0) return cs_strdup2(".");
+
+    // Work on a mutable copy so we can NUL-terminate segments in-place.
+    char* tmp = (char*)malloc(len + 1);
+    if (!tmp) return NULL;
     for (size_t i = 0; i < len; i++) {
-        normalized[i] = (path[i] == '\\') ? '/' : path[i];
+        tmp[i] = (path[i] == '\\') ? '/' : path[i];
     }
-    normalized[len] = '\0';
-    
-    // Simple normalization: remove redundant slashes
-    size_t write = 0;
-    int last_was_slash = 0;
-    for (size_t read = 0; read < len; read++) {
-        if (normalized[read] == '/') {
-            if (!last_was_slash) {
-                normalized[write++] = '/';
-                last_was_slash = 1;
-            }
+    tmp[len] = 0;
+
+    // Detect prefix / root.
+    // - POSIX absolute: "/..."
+    // - Windows drive: "C:" or "C:/..."
+    // - UNC-ish: "//server/share" (we preserve leading "//")
+    size_t start = 0;
+    int is_abs = 0;
+    int has_drive = 0;
+    char drive0 = 0;
+    if (len >= 2 && ((tmp[0] >= 'A' && tmp[0] <= 'Z') || (tmp[0] >= 'a' && tmp[0] <= 'z')) && tmp[1] == ':') {
+        has_drive = 1;
+        drive0 = tmp[0];
+        start = 2;
+        if (tmp[2] == '/') {
+            is_abs = 1;
+            start = 3;
+        }
+    } else if (tmp[0] == '/') {
+        is_abs = 1;
+        if (tmp[1] == '/') {
+            // UNC-ish / network path.
+            start = 2;
         } else {
-            normalized[write++] = normalized[read];
-            last_was_slash = 0;
+            start = 1;
         }
     }
-    normalized[write] = '\0';
-    
-    return normalized;
+
+    size_t max_parts = (len / 2) + 2;
+    char** parts = (char**)malloc(sizeof(char*) * max_parts);
+    if (!parts) { free(tmp); return NULL; }
+    size_t count = 0;
+
+    // Split into segments and resolve '.' / '..'.
+    size_t i = start;
+    while (i <= len) {
+        // Skip slashes
+        while (i < len && tmp[i] == '/') i++;
+        if (i >= len) break;
+
+        size_t seg_start = i;
+        while (i < len && tmp[i] != '/') i++;
+        tmp[i] = 0; // terminate segment
+        char* seg = &tmp[seg_start];
+
+        if (seg[0] == 0 || (seg[0] == '.' && seg[1] == 0)) {
+            // skip empty and '.'
+        } else if (seg[0] == '.' && seg[1] == '.' && seg[2] == 0) {
+            // '..'
+            if (count > 0 && strcmp(parts[count - 1], "..") != 0) {
+                count--; // pop
+            } else {
+                // For relative paths, preserve leading ".."; for absolute paths, clamp at root.
+                if (!is_abs) parts[count++] = seg;
+            }
+        } else {
+            parts[count++] = seg;
+        }
+
+        i++; // move past NUL (was '/')
+    }
+
+    // Compute output length.
+    size_t out_len = 0;
+    if (has_drive) {
+        out_len += 2; // "C:"
+        if (is_abs) out_len += 1; // "/"
+    } else if (is_abs) {
+        out_len += (tmp[0] == '/' && tmp[1] == '/') ? 2 : 1;
+    }
+    if (count == 0) {
+        if (!is_abs && !has_drive) {
+            free(parts);
+            free(tmp);
+            return cs_strdup2(".");
+        }
+        // Absolute root (or drive root / "C:" relative-to-drive).
+        char* out0 = (char*)malloc(out_len + 1);
+        if (!out0) { free(parts); free(tmp); return NULL; }
+        size_t w0 = 0;
+        if (has_drive) {
+            out0[w0++] = drive0;
+            out0[w0++] = ':';
+            if (is_abs) out0[w0++] = '/';
+        } else if (is_abs) {
+            out0[w0++] = '/';
+            if (tmp[0] == '/' && tmp[1] == '/') out0[w0++] = '/';
+        }
+        out0[w0] = 0;
+        free(parts);
+        free(tmp);
+        return out0;
+    }
+
+    for (size_t p = 0; p < count; p++) {
+        out_len += strlen(parts[p]);
+        if (p + 1 < count) out_len += 1; // '/'
+    }
+    // If prefix exists and doesn't already end with '/', we may need one before first segment.
+    int prefix_ends_with_slash = 0;
+    if (has_drive) prefix_ends_with_slash = is_abs;
+    else if (is_abs) prefix_ends_with_slash = 1; // '/' or '//'
+    if ((has_drive || is_abs) && !prefix_ends_with_slash) out_len += 1;
+
+    char* out = (char*)malloc(out_len + 1);
+    if (!out) { free(parts); free(tmp); return NULL; }
+
+    size_t w = 0;
+    if (has_drive) {
+        out[w++] = drive0;
+        out[w++] = ':';
+        if (is_abs) out[w++] = '/';
+    } else if (is_abs) {
+        out[w++] = '/';
+        if (tmp[0] == '/' && tmp[1] == '/') out[w++] = '/';
+    }
+
+    if (w > 0 && out[w - 1] != '/') {
+        out[w++] = '/';
+    }
+
+    for (size_t p = 0; p < count; p++) {
+        size_t n = strlen(parts[p]);
+        memcpy(out + w, parts[p], n);
+        w += n;
+        if (p + 1 < count) out[w++] = '/';
+    }
+    out[w] = 0;
+
+    free(parts);
+    free(tmp);
+    return out;
 }
 
 static char* path_dirname_alloc(const char* path) {
