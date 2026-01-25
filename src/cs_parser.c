@@ -125,9 +125,8 @@ static ast* parse_primary(parser* P) {
     }
 
     if (P->tok.type == TK_IDENT) {
-        // allow dotted identifiers: ident ('.' ident)*
-        ast* n = node(P, N_IDENT);
-        char* base = cs_strndup2(P->tok.start, P->tok.len);
+        ast* expr = node(P, N_IDENT);
+        expr->as.ident.name = cs_strndup2(P->tok.start, P->tok.len);
         next(P);
 
         while (accept(P, TK_DOT)) {
@@ -135,22 +134,13 @@ static ast* parse_primary(parser* P) {
                 if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after '.'");
                 break;
             }
-            char* part = cs_strndup2(P->tok.start, P->tok.len);
+            ast* gf = node(P, N_GETFIELD);
+            gf->as.getfield.target = expr;
+            gf->as.getfield.field = cs_strndup2(P->tok.start, P->tok.len);
             next(P);
-
-            size_t a = strlen(base), b = strlen(part);
-            char* joined = (char*)malloc(a + 1 + b + 1);
-            if (!joined) { free(part); break; }
-            memcpy(joined, base, a);
-            joined[a] = '.';
-            memcpy(joined + a + 1, part, b + 1);
-            free(base);
-            free(part);
-            base = joined;
+            expr = gf;
         }
-
-        n->as.ident.name = base;
-        return n;
+        return expr;
     }
 
     if (!P->error) P->error = fmt_err(P, &P->tok, "expected expression");

@@ -108,6 +108,50 @@ static void vm_dir_pop(cs_vm* vm) {
     free(vm->dir_stack[--vm->dir_count]);
 }
 
+static int env_find(cs_env* e, const char* key);
+
+static int env_get_nocopy(cs_env* e, const char* key, cs_value* out) {
+    for (cs_env* cur = e; cur; cur = cur->parent) {
+        int idx = env_find(cur, key);
+        if (idx >= 0) { *out = cur->vals[idx]; return 1; }
+    }
+    return 0;
+}
+
+static int getfield_dotted_name(ast* e, char* buf, size_t cap) {
+    // Build "a.b.c" for nested GETFIELD ending in IDENT, else return 0.
+    if (!e || !buf || cap == 0) return 0;
+    buf[0] = 0;
+
+    // collect field names reversed
+    const char* parts[32];
+    size_t count = 0;
+    ast* cur = e;
+    while (cur && cur->type == N_GETFIELD && count < 31) {
+        parts[count++] = cur->as.getfield.field;
+        cur = cur->as.getfield.target;
+    }
+    if (!cur || cur->type != N_IDENT) return 0;
+    parts[count++] = cur->as.ident.name;
+
+    // write reversed: IDENT then fields
+    size_t w = 0;
+    for (size_t i = 0; i < count; i++) {
+        const char* p = parts[count - 1 - i];
+        size_t n = strlen(p ? p : "");
+        if (n == 0) return 0;
+        if (i > 0) {
+            if (w + 1 >= cap) return 0;
+            buf[w++] = '.';
+        }
+        if (w + n >= cap) return 0;
+        memcpy(buf + w, p, n);
+        w += n;
+    }
+    buf[w] = 0;
+    return 1;
+}
+
 // Exposed error helpers
 const char* cs_vm_last_error(cs_vm* vm) {
     if (!vm || !vm->last_error) return "";
@@ -133,6 +177,7 @@ static cs_native* as_native(cs_value v){ return (cs_native*)v.as.p; }
 static cs_string* as_str(cs_value v){ return (cs_string*)v.as.p; }
 static cs_list_obj* as_list(cs_value v){ return (cs_list_obj*)v.as.p; }
 static cs_map_obj*  as_map(cs_value v){ return (cs_map_obj*)v.as.p; }
+static cs_strbuf_obj* as_strbuf(cs_value v){ return (cs_strbuf_obj*)v.as.p; }
 static struct cs_func* as_func(cs_value v){ return (struct cs_func*)v.as.p; }
 
 static void env_incref(cs_env* e);
@@ -146,6 +191,13 @@ const char* cs_to_cstr(cs_value v) {
 cs_value cs_str(cs_vm* vm, const char* s) {
     (void)vm;
     cs_string* st = cs_str_new(s ? s : "");
+    cs_value v; v.type = CS_T_STR; v.as.p = st;
+    return v;
+}
+
+cs_value cs_str_take(cs_vm* vm, char* owned, uint64_t len) {
+    (void)vm;
+    cs_string* st = cs_str_new_take(owned, (size_t)len);
     cs_value v; v.type = CS_T_STR; v.as.p = st;
     return v;
 }
@@ -182,6 +234,27 @@ static cs_map_obj* map_new(void) {
     return m;
 }
 
+static cs_strbuf_obj* strbuf_new(void) {
+    cs_strbuf_obj* b = (cs_strbuf_obj*)calloc(1, sizeof(cs_strbuf_obj));
+    if (!b) return NULL;
+    b->ref = 1;
+    b->cap = 256;
+    b->data = (char*)malloc(b->cap + 1);
+    if (!b->data) { free(b); return NULL; }
+    b->len = 0;
+    b->data[0] = 0;
+    return b;
+}
+
+static void strbuf_incref(cs_strbuf_obj* b) { if (b) b->ref++; }
+
+static void strbuf_decref(cs_strbuf_obj* b) {
+    if (!b) return;
+    if (--b->ref > 0) return;
+    free(b->data);
+    free(b);
+}
+
 static void map_incref(cs_map_obj* m) { if (m) m->ref++; }
 
 static void map_decref(cs_map_obj* m) {
@@ -209,10 +282,18 @@ cs_value cs_map(cs_vm* vm) {
     return v;
 }
 
+cs_value cs_strbuf(cs_vm* vm) {
+    (void)vm;
+    cs_strbuf_obj* b = strbuf_new();
+    cs_value v; v.type = CS_T_STRBUF; v.as.p = b;
+    return v;
+}
+
 cs_value cs_value_copy(cs_value v) {
     if (v.type == CS_T_STR) cs_str_incref(as_str(v));
     else if (v.type == CS_T_LIST) list_incref(as_list(v));
     else if (v.type == CS_T_MAP) map_incref(as_map(v));
+    else if (v.type == CS_T_STRBUF) strbuf_incref(as_strbuf(v));
     else if (v.type == CS_T_NATIVE) as_native(v)->ref++;
     else if (v.type == CS_T_FUNC) as_func(v)->ref++;
     return v;
@@ -222,6 +303,7 @@ void cs_value_release(cs_value v) {
     if (v.type == CS_T_STR) cs_str_decref(as_str(v));
     else if (v.type == CS_T_LIST) list_decref(as_list(v));
     else if (v.type == CS_T_MAP) map_decref(as_map(v));
+    else if (v.type == CS_T_STRBUF) strbuf_decref(as_strbuf(v));
     else if (v.type == CS_T_NATIVE) {
         cs_native* nf = as_native(v);
         if (nf && --nf->ref <= 0) free(nf);
@@ -309,6 +391,14 @@ static int env_get(cs_env* e, const char* key, cs_value* out) {
         if (idx >= 0) { *out = cs_value_copy(cur->vals[idx]); return 1; }
     }
     return 0;
+}
+
+static cs_value* env_get_slot(cs_env* e, const char* key) {
+    for (cs_env* cur = e; cur; cur = cur->parent) {
+        int idx = env_find(cur, key);
+        if (idx >= 0) return &cur->vals[idx];
+    }
+    return NULL;
 }
 
 static int is_truthy(cs_value v) {
@@ -418,6 +508,53 @@ static int map_set(cs_map_obj* m, cs_string* key, cs_value v) {
     return 1;
 }
 
+// ---------- string helpers ----------
+static int str_append_inplace(cs_string* s, const char* add, size_t add_len) {
+    if (!s || !add) return 0;
+    size_t new_len = s->len + add_len;
+    char* buf = s->data;
+    if (new_len > s->cap) {
+        size_t nc = s->cap ? s->cap : 16;
+        while (nc < new_len) nc *= 2;
+        buf = (char*)realloc(s->data, nc + 1);
+        if (!buf) return 0;
+        s->data = buf;
+        s->cap = nc;
+    }
+    memcpy(buf + s->len, add, add_len);
+    buf[new_len] = 0;
+    s->len = new_len;
+    return 1;
+}
+
+static int strbuf_reserve(cs_strbuf_obj* b, size_t need) {
+    if (!b) return 0;
+    if (need <= b->cap) return 1;
+    size_t nc = b->cap ? b->cap : 256;
+    while (nc < need) nc *= 2;
+    char* nb = (char*)realloc(b->data, nc + 1);
+    if (!nb) return 0;
+    b->data = nb;
+    b->cap = nc;
+    return 1;
+}
+
+static int strbuf_append_bytes(cs_strbuf_obj* b, const char* s, size_t n) {
+    if (!b || !s) return 0;
+    if (!strbuf_reserve(b, b->len + n)) return 0;
+    memcpy(b->data + b->len, s, n);
+    b->len += n;
+    b->data[b->len] = 0;
+    return 1;
+}
+
+static int strbuf_append_int(cs_strbuf_obj* b, int64_t v) {
+    char tmp[64];
+    int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)v);
+    if (n <= 0) return 0;
+    return strbuf_append_bytes(b, tmp, (size_t)n);
+}
+
 // ---------- error ----------
 static void vm_set_err(cs_vm* vm, const char* msg, const char* source, int line, int col) {
     free(vm->last_error);
@@ -489,9 +626,7 @@ static cs_value eval_binop(cs_vm* vm, ast* e, cs_value a, cs_value b, int* ok) {
             if (!joined) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
             memcpy(joined, sa, na);
             memcpy(joined + na, sb, nb + 1);
-            cs_value out = cs_str(vm, joined);
-            free(joined);
-            return out;
+            return cs_str_take(vm, joined, (uint64_t)(na + nb));
         }
         vm_set_err(vm, "type error: '+' expects int or string", e->source_name, e->line, e->col);
         *ok = 0; return cs_nil();
@@ -564,9 +699,7 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
             size_t n = strlen(e->as.lit_str.s);
             char* un = unescape_string_token(e->as.lit_str.s, n);
             if (!un) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
-            cs_value v = cs_str(vm, un);
-            free(un);
-            return v;
+            return cs_str_take(vm, un, (uint64_t)-1);
         }
 
         case N_FUNCLIT: {
@@ -672,9 +805,182 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
             return out;
         }
 
+        case N_GETFIELD: {
+            // If this is something like fm.status and fm isn't defined as a value, fall back to dotted globals.
+            if (e->as.getfield.target && e->as.getfield.target->type == N_IDENT) {
+                cs_value base;
+                if (!env_get_nocopy(env, e->as.getfield.target->as.ident.name, &base)) {
+                    char name[256];
+                    if (getfield_dotted_name(e, name, sizeof(name))) {
+                        cs_value v;
+                        if (env_get(env, name, &v)) return v;
+                    }
+                    vm_set_err(vm, "undefined variable", e->source_name, e->line, e->col);
+                    *ok = 0;
+                    return cs_nil();
+                }
+            }
+
+            cs_value target = eval_expr(vm, env, e->as.getfield.target, ok);
+            if (!*ok) return cs_nil();
+
+            cs_value out = cs_nil();
+            if (target.type == CS_T_MAP) {
+                out = map_get(as_map(target), e->as.getfield.field);
+            } else {
+                vm_set_err(vm, "field access expects map", e->source_name, e->line, e->col);
+                *ok = 0;
+            }
+            cs_value_release(target);
+            return out;
+        }
+
         case N_CALL: {
             const char* call_name = NULL;
             if (e->as.call.callee && e->as.call.callee->type == N_IDENT) call_name = e->as.call.callee->as.ident.name;
+
+            // Method call support: `obj.method(a,b)` where callee is GETFIELD.
+            if (e->as.call.callee && e->as.call.callee->type == N_GETFIELD) {
+                ast* gf = e->as.call.callee;
+                const char* field = gf->as.getfield.field;
+
+                // Back-compat: if `fm` isn't defined, try calling global "fm.status" etc.
+                if (gf->as.getfield.target && gf->as.getfield.target->type == N_IDENT) {
+                    cs_value dummy;
+                    if (!env_get_nocopy(env, gf->as.getfield.target->as.ident.name, &dummy)) {
+                        char name[256];
+                        if (getfield_dotted_name(gf, name, sizeof(name))) {
+                            cs_value f;
+                            if (env_get(env, name, &f)) {
+                                int argc = (int)e->as.call.argc;
+                                cs_value* argv = NULL;
+                                if (argc > 0) {
+                                    argv = (cs_value*)calloc((size_t)argc, sizeof(cs_value));
+                                    if (!argv) { cs_value_release(f); vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+                                    for (int i = 0; i < argc; i++) {
+                                        argv[i] = eval_expr(vm, env, e->as.call.args[i], ok);
+                                        if (!*ok) break;
+                                    }
+                                }
+                                cs_value out = cs_nil();
+                                if (*ok) {
+                                    if (f.type == CS_T_NATIVE) {
+                                        cs_native* nf = as_native(f);
+                                        vm_frames_push(vm, name, e->source_name, e->line, e->col);
+                                        if (nf->fn(vm, nf->userdata, argc, argv, &out) != 0) {
+                                            if (!vm->last_error) vm_set_err(vm, "native call failed", e->source_name, e->line, e->col);
+                                            *ok = 0;
+                                        }
+                                        vm_frames_pop(vm);
+                                    } else if (f.type == CS_T_FUNC) {
+                                        struct cs_func* fn = as_func(f);
+                                        cs_env* callenv = env_new(fn->closure);
+                                        if (!callenv) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; }
+                                        if (*ok) {
+                                            if ((size_t)argc != fn->param_count) {
+                                                vm_set_err(vm, "wrong argument count", e->source_name, e->line, e->col);
+                                                *ok = 0;
+                                            } else {
+                                                vm_frames_push(vm, name, e->source_name, e->line, e->col);
+                                                for (size_t i = 0; i < fn->param_count; i++) env_set_here(callenv, fn->params[i], argv[i]);
+                                                exec_result r = exec_block(vm, callenv, fn->body);
+                                                if (!r.ok) *ok = 0;
+                                                if (r.did_return) out = cs_value_copy(r.ret);
+                                                cs_value_release(r.ret);
+                                                vm_frames_pop(vm);
+                                            }
+                                        }
+                                        env_decref(callenv);
+                                    } else {
+                                        vm_set_err(vm, "attempted to call non-function", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                    }
+                                }
+                                if (argv) { for (int i = 0; i < argc; i++) cs_value_release(argv[i]); free(argv); }
+                                cs_value_release(f);
+                                return out;
+                            }
+                        }
+                        vm_set_err(vm, "undefined variable", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                }
+
+                cs_value self = eval_expr(vm, env, gf->as.getfield.target, ok);
+                if (!*ok) return cs_nil();
+
+                // Build argv for method: (self, ...args)
+                int argc0 = (int)e->as.call.argc;
+                cs_value* argv0 = NULL;
+                if (argc0 > 0) {
+                    argv0 = (cs_value*)calloc((size_t)argc0, sizeof(cs_value));
+                    if (!argv0) { cs_value_release(self); vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+                    for (int i = 0; i < argc0; i++) {
+                        argv0[i] = eval_expr(vm, env, e->as.call.args[i], ok);
+                        if (!*ok) break;
+                    }
+                }
+
+                cs_value out = cs_nil();
+                if (*ok) {
+                    if (self.type == CS_T_STRBUF) {
+                        cs_strbuf_obj* b = as_strbuf(self);
+                        if (strcmp(field, "append") == 0) {
+                            if (argc0 != 1) {
+                                vm_set_err(vm, "strbuf.append expects 1 argument", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                cs_value v = argv0[0];
+                                int ok2 = 1;
+                                if (v.type == CS_T_STR) ok2 = strbuf_append_bytes(b, as_str(v)->data, as_str(v)->len);
+                                else if (v.type == CS_T_INT) ok2 = strbuf_append_int(b, v.as.i);
+                                else if (v.type == CS_T_BOOL) ok2 = strbuf_append_bytes(b, v.as.b ? "true" : "false", v.as.b ? 4 : 5);
+                                else if (v.type == CS_T_NIL) ok2 = strbuf_append_bytes(b, "nil", 3);
+                                else ok2 = 0;
+                                if (!ok2) { vm_set_err(vm, "strbuf.append failed", e->source_name, e->line, e->col); *ok = 0; }
+                            }
+                        } else if (strcmp(field, "str") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "strbuf.str expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                char* copy = (char*)malloc(b->len + 1);
+                                if (!copy) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; }
+                                else {
+                                    memcpy(copy, b->data, b->len + 1);
+                                    out = cs_str_take(vm, copy, (uint64_t)b->len);
+                                }
+                            }
+                        } else if (strcmp(field, "clear") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "strbuf.clear expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                b->len = 0;
+                                if (b->data) b->data[0] = 0;
+                            }
+                        } else if (strcmp(field, "len") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "strbuf.len expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                out = cs_int((int64_t)b->len);
+                            }
+                        } else {
+                            vm_set_err(vm, "unknown strbuf method", e->source_name, e->line, e->col);
+                            *ok = 0;
+                        }
+                    } else {
+                        vm_set_err(vm, "method call expects strbuf (for now)", e->source_name, e->line, e->col);
+                        *ok = 0;
+                    }
+                }
+
+                if (argv0) { for (int i = 0; i < argc0; i++) cs_value_release(argv0[i]); free(argv0); }
+                cs_value_release(self);
+                return out;
+            }
 
             cs_value callee = eval_expr(vm, env, e->as.call.callee, ok);
             if (!*ok) return cs_nil();
@@ -786,8 +1092,50 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
         }
 
         case N_ASSIGN: {
+            // Fast-path: `x = x + rhs` for strings (in-place append when safe).
+            ast* rhs = s->as.assign_stmt.value;
+            if (rhs && rhs->type == N_BINOP && rhs->as.binop.op == TK_PLUS &&
+                rhs->as.binop.left && rhs->as.binop.left->type == N_IDENT &&
+                rhs->as.binop.left->as.ident.name &&
+                strcmp(rhs->as.binop.left->as.ident.name, s->as.assign_stmt.name) == 0) {
+
+                cs_value* slot = env_get_slot(env, s->as.assign_stmt.name);
+                if (slot && slot->type == CS_T_STR) {
+                    cs_string* base = (cs_string*)slot->as.p;
+                    if (base && base->ref == 1) {
+                        int ok = 1;
+                        cs_value rv = eval_expr(vm, env, rhs->as.binop.right, &ok);
+                        if (!ok) { r.ok = 0; return r; }
+
+                        const char* add = NULL;
+                        size_t add_len = 0;
+                        char tmp[64];
+
+                        if (rv.type == CS_T_STR) {
+                            cs_string* rs = (cs_string*)rv.as.p;
+                            add = rs ? rs->data : "";
+                            add_len = rs ? rs->len : 0;
+                        } else if (rv.type == CS_T_INT) {
+                            int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)rv.as.i);
+                            add = tmp;
+                            add_len = (n > 0) ? (size_t)n : 0;
+                        } else {
+                            cs_value_release(rv);
+                            vm_set_err(vm, "type error: '+' expects int or string", s->source_name, s->line, s->col);
+                            r.ok = 0;
+                            return r;
+                        }
+
+                        int appended = str_append_inplace(base, add, add_len);
+                        cs_value_release(rv);
+                        if (!appended) { vm_set_err(vm, "out of memory", s->source_name, s->line, s->col); r.ok = 0; }
+                        return r;
+                    }
+                }
+            }
+
             int ok = 1;
-            cs_value v = eval_expr(vm, env, s->as.assign_stmt.value, &ok);
+            cs_value v = eval_expr(vm, env, rhs, &ok);
             if (!ok) { r.ok = 0; return r; }
             env_set(env, s->as.assign_stmt.name, v);
             cs_value_release(v);

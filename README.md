@@ -102,6 +102,15 @@ Stdlib provides:
 
 Paths are resolved relative to the currently-running script file’s directory.
 
+### Field access and method calls
+
+`obj.field` is supported as field access:
+- If `obj` is a map, `obj.field` returns the same value as `obj["field"]`.
+
+`obj.method(a, b)` is supported as a method call (currently used by `strbuf`).
+
+Compatibility note: CupidFM-style dotted globals still work (e.g. `fm.status("hi")`) even if `fm` is not a script value; the VM falls back to looking up a global named `"fm.status"`.
+
 ### Function references and closures
 
 Functions are values, so you can pass them to native APIs as callbacks:
@@ -241,7 +250,7 @@ $CC $CFLAGS -Isrc "$OBJDIR/main.o" "$BINDIR/libcupidscript.a" -o "$BINDIR/cupids
   - `cs_call_value` (call a function value from C)
   - `cs_vm_last_error` / `cs_error` (get/set VM error from native code)
   - `cs_last_error` (compat getter; returns `NULL` if no error)
-  - `cs_to_cstr`, `cs_nil`, `cs_bool`, `cs_int`, `cs_str`
+  - `cs_to_cstr`, `cs_nil`, `cs_bool`, `cs_int`, `cs_str`, `cs_str_take`
   - `cs_list`, `cs_map`
   - `cs_value_copy`, `cs_value_release` (retain/release values for host storage)
 
@@ -303,6 +312,23 @@ Note: You can usually use indexing instead of `mget/mset`:
 
 - `now_ms()` → current wall-clock time in milliseconds (int)
 - `sleep(ms)` → sleep for `ms` milliseconds (blocking; implemented via POSIX `nanosleep`)
+
+### `strbuf` (string builder)
+
+For high-performance string construction, use the native string builder:
+
+```cs
+let b = strbuf();
+b.append("x");
+b.append(123);
+let s = b.str();
+```
+
+Methods:
+- `b.append(x)` → appends a value (`string`, `int`, `bool`, `nil`)
+- `b.str()` → returns a string snapshot
+- `b.len()` → current length (bytes)
+- `b.clear()` → clears the buffer
 
 ---
 

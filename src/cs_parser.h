@@ -21,6 +21,7 @@ typedef enum {
     N_UNOP,
     N_CALL,
     N_INDEX,
+    N_GETFIELD,
     N_FUNCLIT,
     N_IDENT,
     N_LIT_INT,
@@ -59,6 +60,7 @@ struct ast {
 
         struct { ast* callee; ast** args; size_t argc; } call;
         struct { ast* target; ast* index; } index;
+        struct { ast* target; char* field; } getfield;
         struct { char** params; size_t param_count; ast* body; } funclit;
 
         struct { char* name; } ident;

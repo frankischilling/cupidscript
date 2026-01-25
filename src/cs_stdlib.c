@@ -77,6 +77,11 @@ static const char* value_repr(cs_value v, char* buf, size_t buf_sz) {
             snprintf(buf, buf_sz, "<map len=%lld>", (long long)(m ? m->len : 0));
             return buf;
         }
+        case CS_T_STRBUF: {
+            cs_strbuf_obj* b = (cs_strbuf_obj*)v.as.p;
+            snprintf(buf, buf_sz, "<strbuf len=%lld>", (long long)(b ? b->len : 0));
+            return buf;
+        }
         case CS_T_FUNC:   return "<function>";
         case CS_T_NATIVE: return "<native>";
         default:          return "<obj>";
@@ -226,6 +231,14 @@ static int nf_map(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value*
     return 0;
 }
 
+static int nf_strbuf(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud; (void)argc; (void)argv;
+    if (!out) return 0;
+    *out = cs_strbuf(vm);
+    if (!out->as.p) { cs_error(vm, "out of memory"); return 1; }
+    return 0;
+}
+
 static int nf_len(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
     (void)vm; (void)ud;
     if (!out) return 0;
@@ -233,6 +246,7 @@ static int nf_len(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value*
     if (argv[0].type == CS_T_STR) { *out = cs_int((int64_t)((cs_string*)argv[0].as.p)->len); return 0; }
     if (argv[0].type == CS_T_LIST) { *out = cs_int((int64_t)((cs_list_obj*)argv[0].as.p)->len); return 0; }
     if (argv[0].type == CS_T_MAP) { *out = cs_int((int64_t)((cs_map_obj*)argv[0].as.p)->len); return 0; }
+    if (argv[0].type == CS_T_STRBUF) { *out = cs_int((int64_t)((cs_strbuf_obj*)argv[0].as.p)->len); return 0; }
     *out = cs_int(0);
     return 0;
 }
@@ -386,8 +400,7 @@ static int nf_str_replace(cs_vm* vm, void* ud, int argc, const cs_value* argv, c
     memcpy(buf + w, p, tail);
     w += tail;
     buf[w] = 0;
-    *out = cs_str(vm, buf);
-    free(buf);
+    *out = cs_str_take(vm, buf, (uint64_t)w);
     return 0;
 }
 
@@ -421,8 +434,7 @@ static int nf_str_split(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
         if (!part) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
         memcpy(part, p, n);
         part[n] = 0;
-        cs_value sv = cs_str(vm, part);
-        free(part);
+        cs_value sv = cs_str_take(vm, part, (uint64_t)n);
         if (!list_ensure(l, l->len + 1)) { cs_value_release(sv); cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
         l->items[l->len++] = sv;
         p = hit + sepl;
@@ -441,8 +453,7 @@ static int nf_path_join(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
     if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_nil(); return 0; }
     char* joined = path_join_alloc(((cs_string*)argv[0].as.p)->data, ((cs_string*)argv[1].as.p)->data);
     if (!joined) { cs_error(vm, "out of memory"); return 1; }
-    *out = cs_str(vm, joined);
-    free(joined);
+    *out = cs_str_take(vm, joined, (uint64_t)-1);
     return 0;
 }
 
@@ -462,8 +473,7 @@ static int nf_path_dirname(cs_vm* vm, void* ud, int argc, const cs_value* argv, 
     if (!buf) { cs_error(vm, "out of memory"); return 1; }
     memcpy(buf, path, n);
     buf[n] = 0;
-    *out = cs_str(vm, buf);
-    free(buf);
+    *out = cs_str_take(vm, buf, (uint64_t)n);
     return 0;
 }
 
@@ -567,8 +577,7 @@ static int nf_fmt(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value*
 
     if (!buf) buf = cs_strdup2_local("");
     if (!buf) { cs_error(vm, "out of memory"); return 1; }
-    *out = cs_str(vm, buf);
-    free(buf);
+    *out = cs_str_take(vm, buf, (uint64_t)len);
     return 0;
 }
 
@@ -616,6 +625,7 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "require", nf_require, NULL);
     cs_register_native(vm, "list",   nf_list,   NULL);
     cs_register_native(vm, "map",    nf_map,    NULL);
+    cs_register_native(vm, "strbuf", nf_strbuf, NULL);
     cs_register_native(vm, "len",    nf_len,    NULL);
     cs_register_native(vm, "push",   nf_push,   NULL);
     cs_register_native(vm, "pop",    nf_pop,    NULL);

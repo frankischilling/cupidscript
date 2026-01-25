@@ -61,15 +61,38 @@ fn bench_maps(n) {
   return sum;
 }
 
-fn bench_strings(n) {
+fn bench_strings_append(n) {
   let i = 0;
   let s = "";
   while (i < n) {
-    // keep strings small-ish to avoid quadratic explosion
+    // common pattern in plugins: incremental append
+    s = s + "x";
+    i = i + 1;
+  }
+  return len(s);
+}
+
+fn bench_strings_replace(n) {
+  let i = 0;
+  let s = "";
+  while (i < n) {
+    // worst-case: forces full-copy style string processing
     if (len(s) > 256) { s = str_replace(s, "x", "x"); }
     s = s + "x";
     i = i + 1;
   }
+  return len(s);
+}
+
+fn bench_strbuf(n) {
+  let b = strbuf();
+  let i = 0;
+  while (i < n) {
+    b.append(i);
+    b.append(",");
+    i = i + 1;
+  }
+  let s = b.str();
   return len(s);
 }
 
@@ -92,13 +115,20 @@ let t3 = now_ms();
 let d = bench_maps(Nsmall);
 let t4 = now_ms();
 
-let e = bench_strings(20000);
+let e = bench_strings_append(200000);
 let t5 = now_ms();
+
+let f = bench_strings_replace(20000);
+let t6 = now_ms();
+
+let g = bench_strbuf(200000);
+let t7 = now_ms();
 
 print("arith ms =", t1 - t0, "result =", a);
 print("calls ms =", t2 - t1, "result =", b);
 print("lists ms =", t3 - t2, "result =", c);
 print("maps  ms =", t4 - t3, "result =", d);
-print("strs  ms =", t5 - t4, "result =", e);
-print("total ms =", t5 - t0);
-
+print("str+  ms =", t5 - t4, "result =", e);
+print("str~  ms =", t6 - t5, "result =", f);
+print("strb  ms =", t7 - t6, "result =", g);
+print("total ms =", t7 - t0);

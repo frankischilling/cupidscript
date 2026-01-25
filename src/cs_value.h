@@ -7,6 +7,7 @@
 typedef struct cs_string {
     int ref;
     size_t len;
+    size_t cap; // capacity in bytes excluding trailing NUL
     char* data;
 } cs_string;
 
@@ -37,8 +38,16 @@ typedef struct cs_map_obj {
     cs_map_entry* entries;
 } cs_map_obj;
 
+typedef struct cs_strbuf_obj {
+    int ref;
+    size_t len;
+    size_t cap;
+    char* data;
+} cs_strbuf_obj;
+
 // refcounted heap objects
 cs_string* cs_str_new(const char* s);
+cs_string* cs_str_new_take(char* owned, size_t len);
 void       cs_str_incref(cs_string* s);
 void       cs_str_decref(cs_string* s);
 

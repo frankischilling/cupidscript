@@ -16,6 +16,23 @@ cs_string* cs_str_new(const char* s) {
     st->ref = 1;
     st->data = cs_strdup(s ? s : "");
     st->len = st->data ? strlen(st->data) : 0;
+    st->cap = st->len;
+    return st;
+}
+
+cs_string* cs_str_new_take(char* owned, size_t len) {
+    cs_string* st = (cs_string*)calloc(1, sizeof(cs_string));
+    if (!st) { free(owned); return NULL; }
+    st->ref = 1;
+    if (!owned) {
+        st->data = cs_strdup("");
+        st->len = st->data ? strlen(st->data) : 0;
+        st->cap = st->len;
+        return st;
+    }
+    st->data = owned;
+    st->len = (len == (size_t)-1) ? strlen(owned) : len;
+    st->cap = st->len;
     return st;
 }
 
@@ -40,6 +57,7 @@ const char* cs_type_name_impl(cs_type t) {
         case CS_T_STR:    return "string";
         case CS_T_LIST:   return "list";
         case CS_T_MAP:    return "map";
+        case CS_T_STRBUF: return "strbuf";
         case CS_T_FUNC:   return "function";
         case CS_T_NATIVE: return "native";
         default:          return "unknown";
