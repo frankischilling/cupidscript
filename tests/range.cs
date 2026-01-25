@@ -8,7 +8,8 @@ assert(len(xs) == 3, "inclusive range length");
 assert(xs[0] == 1, "range start");
 assert(xs[2] == 3, "range end");
 
-let ys = range(0, 4); // 0,1,2,3
+let ys = list();
+for y in range(0, 4) { push(ys, y); } // 0,1,2,3
 assert(len(ys) == 4, "range() length");
 assert(ys[3] == 3, "range() last");
 
