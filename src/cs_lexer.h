@@ -11,9 +11,20 @@ typedef enum {
     TK_INT,
     TK_FLOAT,
     TK_STR,
+    TK_RAW_STR,
+    TK_STR_PART,    // raw string chunk inside interpolated string
+    TK_STR_END,     // end of interpolated string
+    TK_INTERP_START, // ${
+    TK_INTERP_END,   // }
 
     // keywords
     TK_LET,
+    TK_CONST,
+    TK_MATCH,
+    TK_DEFER,
+    TK_IMPORT,
+    TK_FROM,
+    TK_AS,
     TK_FN,
     TK_IF,
     TK_ELSE,
@@ -30,6 +41,7 @@ typedef enum {
     TK_TRY,
     TK_CATCH,
     TK_FINALLY,
+    TK_EXPORT,
     TK_TRUE,
     TK_FALSE,
     TK_NIL,
@@ -43,6 +55,8 @@ typedef enum {
     TK_DOT,
     TK_COLON,
     TK_QMARK,
+    TK_QQ,          // ??
+    TK_QDOT,        // ?.
 
     // operators
     TK_ASSIGN,     // =
@@ -73,6 +87,8 @@ typedef struct {
     int line;
     int col;
     token current;
+    int mode;          // 0=normal, 1=string, 2=interp, 3=string_end, 4=interp_start
+    int interp_depth;  // brace depth inside ${...}
 } lexer;
 
 void  lex_init(lexer* L, const char* src);

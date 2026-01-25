@@ -60,36 +60,28 @@ static void vm_frames_pop(cs_vm* vm) {
     vm->frame_count--;
 }
 
-static const char* vm_intern_source(cs_vm* vm, const char* name) {
-    if (!vm) return "<input>";
-    const char* n = name ? name : "<input>";
+static const char* vm_intern_source(cs_vm* vm, const char* src) {
+    if (!vm) return src ? src : "";
+    if (!src) src = "";
     for (size_t i = 0; i < vm->source_count; i++) {
-        if (strcmp(vm->sources[i], n) == 0) return vm->sources[i];
+        if (strcmp(vm->sources[i], src) == 0) return vm->sources[i];
     }
     if (vm->source_count == vm->source_cap) {
         size_t nc = vm->source_cap ? vm->source_cap * 2 : 16;
         char** ns = (char**)realloc(vm->sources, nc * sizeof(char*));
-        if (!ns) return "<input>";
+        if (!ns) return src;
         vm->sources = ns;
         vm->source_cap = nc;
     }
-    char* dup = cs_strdup2(n);
-    if (!dup) return "<input>";
+    char* dup = cs_strdup2(src);
+    if (!dup) return src;
     vm->sources[vm->source_count++] = dup;
     return dup;
 }
 
-// Normalize path to canonical-ish form:
-// - converts backslashes to '/'
-// - collapses repeated slashes
-// - resolves '.' and '..' segments (purely lexically)
-// This is used for module caching: './a.cs' and 'x/../a.cs' should map to the same key.
 static char* path_normalize_alloc(const char* path) {
-    if (!path) return NULL;
-
+    if (!path || !*path) return cs_strdup2(".");
     size_t len = strlen(path);
-    if (len == 0) return cs_strdup2(".");
-
     // Work on a mutable copy so we can NUL-terminate segments in-place.
     char* tmp = (char*)malloc(len + 1);
     if (!tmp) return NULL;
@@ -269,6 +261,8 @@ static cs_range_obj* range_new(int64_t start, int64_t end, int64_t step, int inc
 static void range_incref(cs_range_obj* r);
 static void range_decref(cs_range_obj* r);
 
+static cs_env* env_new(cs_env* parent);
+
 static int env_find(cs_env* e, const char* key);
 
 static int env_get_nocopy(cs_env* e, const char* key, cs_value* out) {
@@ -313,6 +307,56 @@ static int getfield_dotted_name(ast* e, char* buf, size_t cap) {
     return 1;
 }
 
+cs_vm* cs_vm_new(void) {
+    cs_vm* vm = (cs_vm*)calloc(1, sizeof(cs_vm));
+    if (!vm) return NULL;
+    vm->globals = env_new(NULL);
+    if (!vm->globals) {
+        free(vm);
+        return NULL;
+    }
+    vm->last_error = NULL;
+    vm->pending_throw = 0;
+    vm->pending_thrown = cs_nil();
+
+    vm->frames = NULL;
+    vm->frame_count = 0;
+    vm->frame_cap = 0;
+
+    vm->sources = NULL;
+    vm->source_count = 0;
+    vm->source_cap = 0;
+
+    vm->dir_stack = NULL;
+    vm->dir_count = 0;
+    vm->dir_cap = 0;
+
+    vm->modules = NULL;
+    vm->module_count = 0;
+    vm->module_cap = 0;
+
+    vm->tracked = NULL;
+    vm->tracked_count = 0;
+
+    vm->asts = NULL;
+    vm->ast_count = 0;
+    vm->ast_cap = 0;
+
+    vm->gc_threshold = 0;
+    vm->gc_allocations = 0;
+    vm->gc_alloc_trigger = 0;
+    vm->gc_collections = 0;
+    vm->gc_objects_collected = 0;
+
+    vm->instruction_count = 0;
+    vm->instruction_limit = 0;
+    vm->exec_start_ms = 0;
+    vm->exec_timeout_ms = 0;
+    vm->interrupt_requested = 0;
+
+    return vm;
+}
+
 // Exposed error helpers
 const char* cs_vm_last_error(cs_vm* vm) {
     if (!vm || !vm->last_error) return "";
@@ -334,6 +378,50 @@ cs_value cs_float(double x){ cs_value v; v.type=CS_T_FLOAT; v.as.f = x; return v
 
 cs_type cs_typeof(cs_value v) { return v.type; }
 const char* cs_type_name(cs_type t){ return cs_type_name_impl(t); }
+
+static const char* interp_repr(cs_value v, char* buf, size_t buf_sz) {
+    if (!buf || buf_sz == 0) return "";
+    buf[0] = 0;
+    switch (v.type) {
+        case CS_T_NIL:  return "nil";
+        case CS_T_BOOL: return v.as.b ? "true" : "false";
+        case CS_T_INT:
+            snprintf(buf, buf_sz, "%lld", (long long)v.as.i);
+            return buf;
+        case CS_T_FLOAT:
+            snprintf(buf, buf_sz, "%g", v.as.f);
+            return buf;
+        case CS_T_STR:
+            return ((cs_string*)v.as.p)->data;
+        case CS_T_LIST: {
+            cs_list_obj* l = (cs_list_obj*)v.as.p;
+            snprintf(buf, buf_sz, "<list len=%lld>", (long long)(l ? l->len : 0));
+            return buf;
+        }
+        case CS_T_MAP: {
+            cs_map_obj* m = (cs_map_obj*)v.as.p;
+            snprintf(buf, buf_sz, "<map len=%lld>", (long long)(m ? m->len : 0));
+            return buf;
+        }
+        case CS_T_STRBUF: {
+            cs_strbuf_obj* b = (cs_strbuf_obj*)v.as.p;
+            snprintf(buf, buf_sz, "<strbuf len=%lld>", (long long)(b ? b->len : 0));
+            return buf;
+        }
+        case CS_T_RANGE: {
+            cs_range_obj* r = (cs_range_obj*)v.as.p;
+            if (!r) return "<range>";
+            snprintf(buf, buf_sz, "<range %lld..%s%lld>",
+                (long long)r->start,
+                r->inclusive ? "=" : "",
+                (long long)r->end);
+            return buf;
+        }
+        case CS_T_FUNC:   return "<function>";
+        case CS_T_NATIVE: return "<native>";
+        default:          return "<obj>";
+    }
+}
 
 static cs_native* as_native(cs_value v){ return (cs_native*)v.as.p; }
 static cs_string* as_str(cs_value v){ return (cs_string*)v.as.p; }
@@ -502,8 +590,8 @@ static void map_decref(cs_map_obj* m) {
     if (!m) return;
     if (--m->ref > 0) return;
     for (size_t i = 0; i < m->cap; i++) {
-        if (!m->entries[i].key) continue;
-        cs_str_decref(m->entries[i].key);
+        if (!m->entries[i].in_use) continue;
+        cs_value_release(m->entries[i].key);
         cs_value_release(m->entries[i].val);
     }
     free(m->entries);
@@ -597,6 +685,7 @@ static void env_decref(cs_env* e) {
     }
     free(e->keys);
     free(e->vals);
+    free(e->is_const);
     free(e);
     env_decref(parent);
 }
@@ -610,6 +699,7 @@ static cs_env* env_new(cs_env* parent) {
     e->cap = 16;
     e->keys = (char**)calloc(e->cap, sizeof(char*));
     e->vals = (cs_value*)calloc(e->cap, sizeof(cs_value));
+    e->is_const = (unsigned char*)calloc(e->cap, sizeof(unsigned char));
     return e;
 }
 
@@ -620,21 +710,36 @@ static int env_find(cs_env* e, const char* key) {
     return -1;
 }
 
-static void env_set_here(cs_env* e, const char* key, cs_value v) {
+static void env_set_here_ex(cs_env* e, const char* key, cs_value v, int is_const) {
     int idx = env_find(e, key);
     if (idx >= 0) {
         cs_value_release(e->vals[idx]);
         e->vals[idx] = cs_value_copy(v);
+        if (is_const) e->is_const[idx] = 1;
         return;
     }
     if (e->count == e->cap) {
         e->cap *= 2;
         e->keys = (char**)realloc(e->keys, e->cap * sizeof(char*));
         e->vals = (cs_value*)realloc(e->vals, e->cap * sizeof(cs_value));
+        e->is_const = (unsigned char*)realloc(e->is_const, e->cap * sizeof(unsigned char));
     }
     e->keys[e->count] = cs_strdup2(key);
     e->vals[e->count] = cs_value_copy(v);
+    e->is_const[e->count] = (unsigned char)(is_const ? 1 : 0);
     e->count++;
+}
+
+static void env_set_here(cs_env* e, const char* key, cs_value v) {
+    env_set_here_ex(e, key, v, 0);
+}
+
+static int env_is_const(cs_env* e, const char* key) {
+    for (cs_env* cur = e; cur; cur = cur->parent) {
+        int idx = env_find(cur, key);
+        if (idx >= 0) return cur->is_const[idx] ? 1 : 0;
+    }
+    return 0;
 }
 
 static int env_assign_existing(cs_env* e, const char* key, cs_value v) {
@@ -642,6 +747,9 @@ static int env_assign_existing(cs_env* e, const char* key, cs_value v) {
     for (cs_env* cur = e; cur; cur = cur->parent) {
         int idx = env_find(cur, key);
         if (idx >= 0) {
+            if (cur->is_const[idx]) {
+                return -1; // const binding
+            }
             cs_value_release(cur->vals[idx]);
             cur->vals[idx] = cs_value_copy(v);
             return 1;
@@ -675,22 +783,7 @@ static int is_truthy(cs_value v) {
 }
 
 static int vm_value_equals(cs_value a, cs_value b) {
-    if (a.type != b.type) {
-        // Allow int == float comparison
-        if ((a.type == CS_T_INT && b.type == CS_T_FLOAT) || (a.type == CS_T_FLOAT && b.type == CS_T_INT)) {
-            double av = (a.type == CS_T_INT) ? (double)a.as.i : a.as.f;
-            double bv = (b.type == CS_T_INT) ? (double)b.as.i : b.as.f;
-            return av == bv;
-        }
-        return 0;
-    }
-
-    if (a.type == CS_T_NIL) return 1;
-    if (a.type == CS_T_BOOL) return a.as.b == b.as.b;
-    if (a.type == CS_T_INT) return a.as.i == b.as.i;
-    if (a.type == CS_T_FLOAT) return a.as.f == b.as.f;
-    if (a.type == CS_T_STR) return strcmp(as_str(a)->data, as_str(b)->data) == 0;
-    return a.as.p == b.as.p;
+    return cs_value_key_equals(a, b);
 }
 
 // ---------- list/map helpers ----------
@@ -738,12 +831,12 @@ static int list_push(cs_list_obj* l, cs_value v) {
     return 1;
 }
 
-// Simple hash function for string keys (djb2)
-static uint32_t hash_key(const char* str) {
-    uint32_t hash = 5381;
-    int c;
-    while ((c = *str++)) hash = ((hash << 5) + hash) + (uint32_t)c;
-    return hash;
+static uint32_t map_key_hash(cs_value key) {
+    return cs_value_hash(key);
+}
+
+static int map_key_equals(cs_value a, cs_value b) {
+    return cs_value_key_equals(a, b);
 }
 
 static int map_rehash(cs_map_obj* m, size_t new_cap) {
@@ -761,10 +854,9 @@ static int map_rehash(cs_map_obj* m, size_t new_cap) {
 
     if (old_entries) {
         for (size_t i = 0; i < old_cap; i++) {
-            if (!old_entries[i].key) continue;
-            uint32_t h = hash_key(old_entries[i].key->data);
-            size_t idx = h % new_cap;
-            while (ne[idx].key != NULL) idx = (idx + 1) % new_cap;
+            if (!old_entries[i].in_use) continue;
+            size_t idx = old_entries[i].hash % new_cap;
+            while (ne[idx].in_use) idx = (idx + 1) % new_cap;
             ne[idx] = old_entries[i];
         }
         free(old_entries);
@@ -773,15 +865,14 @@ static int map_rehash(cs_map_obj* m, size_t new_cap) {
     return 1;
 }
 
-static int map_find(cs_map_obj* m, const char* key) {
-    if (!m || !key || m->len == 0) return -1;
+static int map_find(cs_map_obj* m, cs_value key, uint32_t hash) {
+    if (!m || m->len == 0) return -1;
 
-    uint32_t h = hash_key(key);
-    size_t idx = h % m->cap;
+    size_t idx = hash % m->cap;
     size_t probe = 0;
     while (probe < m->cap) {
-        if (m->entries[idx].key == NULL) return -1;
-        if (strcmp(m->entries[idx].key->data, key) == 0) return (int)idx;
+        if (!m->entries[idx].in_use) return -1;
+        if (m->entries[idx].hash == hash && map_key_equals(m->entries[idx].key, key)) return (int)idx;
         idx = (idx + 1) % m->cap;
         probe++;
     }
@@ -797,14 +888,15 @@ static int map_ensure(cs_map_obj* m, size_t need) {
     return map_rehash(m, nc);
 }
 
-static cs_value map_get(cs_map_obj* m, const char* key) {
-    int idx = map_find(m, key);
+static cs_value map_get_value(cs_map_obj* m, cs_value key) {
+    uint32_t h = map_key_hash(key);
+    int idx = map_find(m, key, h);
     if (idx < 0) return cs_nil();
     return cs_value_copy(m->entries[(size_t)idx].val);
 }
 
-static int map_set(cs_map_obj* m, cs_string* key, cs_value v) {
-    if (!m || !key) return 0;
+static int map_set_value(cs_map_obj* m, cs_value key, cs_value v) {
+    if (!m) return 0;
 
     // Maintain load factor < 0.7
     if ((m->len + 1) > (m->cap * 7 / 10)) {
@@ -812,18 +904,19 @@ static int map_set(cs_map_obj* m, cs_string* key, cs_value v) {
         if (!map_ensure(m, new_cap)) return 0;
     }
 
-    uint32_t h = hash_key(key->data);
+    uint32_t h = map_key_hash(key);
     size_t idx = h % m->cap;
     size_t probe = 0;
     while (probe < m->cap) {
-        if (m->entries[idx].key == NULL) {
-            cs_str_incref(key);
-            m->entries[idx].key = key;
+        if (!m->entries[idx].in_use) {
+            m->entries[idx].key = cs_value_copy(key);
             m->entries[idx].val = cs_value_copy(v);
+            m->entries[idx].hash = h;
+            m->entries[idx].in_use = 1;
             m->len++;
             return 1;
         }
-        if (strcmp(m->entries[idx].key->data, key->data) == 0) {
+        if (m->entries[idx].hash == h && map_key_equals(m->entries[idx].key, key)) {
             cs_value_release(m->entries[idx].val);
             m->entries[idx].val = cs_value_copy(v);
             return 1;
@@ -833,6 +926,68 @@ static int map_set(cs_map_obj* m, cs_string* key, cs_value v) {
     }
 
     return 0;
+}
+
+static int map_has_value(cs_map_obj* m, cs_value key) {
+    if (!m) return 0;
+    uint32_t h = map_key_hash(key);
+    return map_find(m, key, h) >= 0 ? 1 : 0;
+}
+
+static int map_has_cstr(cs_map_obj* m, const char* key) {
+    if (!m || !key) return 0;
+    cs_string* ks = cs_str_new(key);
+    if (!ks) return 0;
+    cs_value kv; kv.type = CS_T_STR; kv.as.p = ks;
+    int ok = map_has_value(m, kv);
+    cs_str_decref(ks);
+    return ok;
+}
+
+static int map_del_value(cs_map_obj* m, cs_value key) {
+    if (!m) return 0;
+    uint32_t h = map_key_hash(key);
+    int idx = map_find(m, key, h);
+    if (idx < 0) return 0;
+
+    cs_map_entry* ne = (cs_map_entry*)calloc(m->cap, sizeof(cs_map_entry));
+    if (!ne) return 0;
+
+    for (size_t i = 0; i < m->cap; i++) {
+        if (!m->entries[i].in_use) continue;
+        if ((int)i == idx) continue;
+        size_t pos = m->entries[i].hash % m->cap;
+        while (ne[pos].in_use) pos = (pos + 1) % m->cap;
+        ne[pos] = m->entries[i];
+    }
+
+    cs_value_release(m->entries[(size_t)idx].key);
+    cs_value_release(m->entries[(size_t)idx].val);
+
+    free(m->entries);
+    m->entries = ne;
+    if (m->len) m->len--;
+    return 1;
+}
+
+static cs_value map_get_cstr(cs_map_obj* m, const char* key) {
+    if (!m || !key) return cs_nil();
+    cs_string* ks = cs_str_new(key);
+    if (!ks) return cs_nil();
+    cs_value kv; kv.type = CS_T_STR; kv.as.p = ks;
+    cs_value out = map_get_value(m, kv);
+    cs_str_decref(ks);
+    return out;
+}
+
+static int map_set_cstr(cs_map_obj* m, const char* key, cs_value v) {
+    if (!m || !key) return 0;
+    cs_string* ks = cs_str_new(key);
+    if (!ks) return 0;
+    cs_value kv; kv.type = CS_T_STR; kv.as.p = ks;
+    int ok = map_set_value(m, kv, v);
+    cs_str_decref(ks);
+    return ok;
 }
 
 // ---------- string helpers ----------
@@ -993,9 +1148,25 @@ static void vm_report_uncaught_throw(cs_vm* vm, cs_value thrown) {
 }
 
 // ---------- string unescape ----------
+static int hex_val_char(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
 static char* unescape_string_token(const char* tok, size_t n) {
-    // tok includes quotes; minimal unescape
-    if (n < 2 || tok[0] != '"' || tok[n-1] != '"') return cs_strdup2("");
+    // tok includes quotes/backticks; minimal unescape
+    if (n < 2) return cs_strdup2("");
+    if (tok[0] == '`' && tok[n - 1] == '`') {
+        size_t out_len = n - 2;
+        char* out = (char*)malloc(out_len + 1);
+        if (!out) return NULL;
+        if (out_len) memcpy(out, tok + 1, out_len);
+        out[out_len] = 0;
+        return out;
+    }
+    if (tok[0] != '"' || tok[n-1] != '"') return cs_strdup2("");
     char* out = (char*)malloc(n + 1);
     if (!out) return NULL;
     size_t w = 0;
@@ -1007,6 +1178,20 @@ static char* unescape_string_token(const char* tok, size_t n) {
                 case 'n': out[w++] = '\n'; break;
                 case 't': out[w++] = '\t'; break;
                 case 'r': out[w++] = '\r'; break;
+                case 'e': out[w++] = 27; break; // ESC
+                case 'x': {
+                    if (i + 2 < n - 1) {
+                        int hi = hex_val_char(tok[i + 1]);
+                        int lo = hex_val_char(tok[i + 2]);
+                        if (hi >= 0 && lo >= 0) {
+                            out[w++] = (char)((hi << 4) | lo);
+                            i += 2;
+                            break;
+                        }
+                    }
+                    out[w++] = 'x';
+                    break;
+                }
                 case '"': out[w++] = '"'; break;
                 case '\\': out[w++] = '\\'; break;
                 default: out[w++] = x; break;
@@ -1042,6 +1227,33 @@ static int exec_take_vm_throw(cs_vm* vm, exec_result* r) {
 static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s);
 static exec_result exec_block(cs_vm* vm, cs_env* env, ast* b);
 static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok);
+
+static int get_exports_map(cs_vm* vm, cs_env* env, ast* s, cs_value* out) {
+    if (out) *out = cs_nil();
+    cs_value exports = cs_nil();
+    if (!env_get(env, "exports", &exports)) {
+        // Create a root-level exports map for non-module scripts.
+        cs_env* root = env;
+        while (root && root->parent) root = root->parent;
+        cs_value new_exports = cs_map(vm);
+        if (!new_exports.as.p) {
+            vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+            return 0;
+        }
+        env_set_here(root ? root : env, "exports", new_exports);
+        cs_value_release(new_exports);
+        (void)env_get(env, "exports", &exports);
+    }
+
+    if (exports.type != CS_T_MAP) {
+        cs_value_release(exports);
+        vm_set_err(vm, "export target is not a map", s->source_name, s->line, s->col);
+        return 0;
+    }
+    if (out) *out = exports;
+    else cs_value_release(exports);
+    return 1;
+}
 
 static cs_value eval_binop(cs_vm* vm, ast* e, cs_value a, cs_value b, int* ok) {
     int op = e->as.binop.op;
@@ -1192,6 +1404,47 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
             return cs_str_take(vm, un, (uint64_t)-1);
         }
 
+        case N_STR_INTERP: {
+            cs_strbuf_obj* b = strbuf_new();
+            if (!b) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+
+            for (size_t i = 0; i < e->as.str_interp.count; i++) {
+                cs_value v = eval_expr(vm, env, e->as.str_interp.parts[i], ok);
+                if (!*ok) { strbuf_decref(b); return cs_nil(); }
+
+                if (v.type == CS_T_STR) {
+                    cs_string* s = (cs_string*)v.as.p;
+                    if (s && !strbuf_append_bytes(b, s->data, s->len)) {
+                        cs_value_release(v);
+                        strbuf_decref(b);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                } else {
+                    char tmp[128];
+                    const char* s = interp_repr(v, tmp, sizeof(tmp));
+                    size_t n = strlen(s);
+                    if (!strbuf_append_bytes(b, s, n)) {
+                        cs_value_release(v);
+                        strbuf_decref(b);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                }
+                cs_value_release(v);
+            }
+
+            char* out = (char*)malloc(b->len + 1);
+            if (!out) { strbuf_decref(b); vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+            memcpy(out, b->data, b->len);
+            out[b->len] = 0;
+            cs_value rv = cs_str_take(vm, out, (uint64_t)b->len);
+            strbuf_decref(b);
+            return rv;
+        }
+
         case N_FUNCLIT: {
             struct cs_func* f = (struct cs_func*)calloc(1, sizeof(struct cs_func));
             if (!f) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
@@ -1253,6 +1506,117 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
             return eval_expr(vm, env, e->as.ternary.else_e, ok);
         }
 
+        case N_MATCH: {
+            cs_value mv = eval_expr(vm, env, e->as.match_expr.expr, ok);
+            if (!*ok) return cs_nil();
+
+            for (size_t i = 0; i < e->as.match_expr.case_count; i++) {
+                cs_env* match_env = env_new(env);
+                if (!match_env) { cs_value_release(mv); vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+
+                int matched = 0;
+                ast* pat = e->as.match_expr.case_patterns[i];
+                if (pat) {
+                    switch (pat->type) {
+                        case N_PATTERN_WILDCARD:
+                            matched = 1;
+                            break;
+                        case N_IDENT: {
+                            if (pat->as.ident.name && strcmp(pat->as.ident.name, "_") == 0) {
+                                matched = 1;
+                            } else {
+                                env_set_here(match_env, pat->as.ident.name, mv);
+                                matched = 1;
+                            }
+                            break;
+                        }
+                        case N_PATTERN_LIST: {
+                            if (mv.type != CS_T_LIST) { matched = 0; break; }
+                            cs_list_obj* l = as_list(mv);
+                            size_t count = pat->as.list_pattern.count;
+                            if (!l || l->len != count) { matched = 0; break; }
+                            matched = 1;
+                            for (size_t j = 0; j < count; j++) {
+                                const char* name = pat->as.list_pattern.names[j];
+                                if (name && strcmp(name, "_") == 0) continue;
+                                cs_value item = cs_value_copy(l->items[j]);
+                                env_set_here(match_env, name, item);
+                                cs_value_release(item);
+                            }
+                            break;
+                        }
+                        case N_PATTERN_MAP: {
+                            if (mv.type != CS_T_MAP) { matched = 0; break; }
+                            cs_map_obj* m = as_map(mv);
+                            matched = 1;
+                            for (size_t j = 0; j < pat->as.map_pattern.count; j++) {
+                                const char* key = pat->as.map_pattern.keys[j];
+                                const char* name = pat->as.map_pattern.names[j];
+                                if (!map_has_cstr(m, key)) { matched = 0; break; }
+                                if (name && strcmp(name, "_") == 0) continue;
+                                cs_value item = map_get_cstr(m, key);
+                                env_set_here(match_env, name, item);
+                                cs_value_release(item);
+                            }
+                            break;
+                        }
+                        case N_LIT_INT: {
+                            cs_value pv = cs_int((int64_t)pat->as.lit_int.v);
+                            matched = vm_value_equals(mv, pv);
+                            break;
+                        }
+                        case N_LIT_FLOAT: {
+                            cs_value pv = cs_float(pat->as.lit_float.v);
+                            matched = vm_value_equals(mv, pv);
+                            break;
+                        }
+                        case N_LIT_BOOL: {
+                            cs_value pv = cs_bool(pat->as.lit_bool.v);
+                            matched = vm_value_equals(mv, pv);
+                            break;
+                        }
+                        case N_LIT_NIL: {
+                            cs_value pv = cs_nil();
+                            matched = vm_value_equals(mv, pv);
+                            break;
+                        }
+                        case N_LIT_STR: {
+                            size_t n = strlen(pat->as.lit_str.s);
+                            char* un = unescape_string_token(pat->as.lit_str.s, n);
+                            if (!un) { env_decref(match_env); cs_value_release(mv); vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+                            cs_value pv = cs_str_take(vm, un, (uint64_t)-1);
+                            matched = vm_value_equals(mv, pv);
+                            cs_value_release(pv);
+                            break;
+                        }
+                        default:
+                            matched = 0;
+                            break;
+                    }
+                }
+
+                if (matched && e->as.match_expr.case_guards[i]) {
+                    cs_value gv = eval_expr(vm, match_env, e->as.match_expr.case_guards[i], ok);
+                    if (!*ok) { env_decref(match_env); cs_value_release(mv); return cs_nil(); }
+                    matched = is_truthy(gv);
+                    cs_value_release(gv);
+                }
+
+                if (matched) {
+                    cs_value out = eval_expr(vm, match_env, e->as.match_expr.case_values[i], ok);
+                    env_decref(match_env);
+                    cs_value_release(mv);
+                    return out;
+                }
+
+                env_decref(match_env);
+            }
+
+            cs_value_release(mv);
+            if (e->as.match_expr.default_expr) return eval_expr(vm, env, e->as.match_expr.default_expr, ok);
+            return cs_nil();
+        }
+
         case N_RANGE: {
             cs_value start = eval_expr(vm, env, e->as.range.left, ok);
             if (!*ok) return cs_nil();
@@ -1309,6 +1673,13 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
                 cs_value_release(right);
                 return cs_bool(rt);
             }
+            if (op == TK_QQ) {
+                cs_value left = eval_expr(vm, env, e->as.binop.left, ok);
+                if (!*ok) return cs_nil();
+                if (left.type != CS_T_NIL) return left;
+                cs_value_release(left);
+                return eval_expr(vm, env, e->as.binop.right, ok);
+            }
 
             cs_value a = eval_expr(vm, env, e->as.binop.left, ok);
             if (!*ok) return cs_nil();
@@ -1347,16 +1718,9 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
             for (size_t i = 0; i < e->as.maplit.count; i++) {
                 cs_value k = eval_expr(vm, env, e->as.maplit.keys[i], ok);
                 if (!*ok) { cs_value_release(mv); return cs_nil(); }
-                if (k.type != CS_T_STR) {
-                    cs_value_release(k);
-                    cs_value_release(mv);
-                    vm_set_err(vm, "map literal keys must be strings", e->source_name, e->line, e->col);
-                    *ok = 0;
-                    return cs_nil();
-                }
                 cs_value v = eval_expr(vm, env, e->as.maplit.vals[i], ok);
                 if (!*ok) { cs_value_release(k); cs_value_release(mv); return cs_nil(); }
-                if (!map_set(m, as_str(k), v)) {
+                if (!map_set_value(m, k, v)) {
                     cs_value_release(k);
                     cs_value_release(v);
                     cs_value_release(mv);
@@ -1379,10 +1743,10 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
             cs_value out = cs_nil();
             if (target.type == CS_T_LIST && index.type == CS_T_INT) {
                 out = list_get(as_list(target), index.as.i);
-            } else if (target.type == CS_T_MAP && index.type == CS_T_STR) {
-                out = map_get(as_map(target), as_str(index)->data);
+            } else if (target.type == CS_T_MAP) {
+                out = map_get_value(as_map(target), index);
             } else {
-                vm_set_err(vm, "indexing expects list[int] or map[string]", e->source_name, e->line, e->col);
+                vm_set_err(vm, "indexing expects list[int] or map[key]", e->source_name, e->line, e->col);
                 *ok = 0;
             }
 
@@ -1412,7 +1776,27 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
 
             cs_value out = cs_nil();
             if (target.type == CS_T_MAP) {
-                out = map_get(as_map(target), e->as.getfield.field);
+                out = map_get_cstr(as_map(target), e->as.getfield.field);
+            } else {
+                vm_set_err(vm, "field access expects map", e->source_name, e->line, e->col);
+                *ok = 0;
+            }
+            cs_value_release(target);
+            return out;
+        }
+
+        case N_OPTGETFIELD: {
+            cs_value target = eval_expr(vm, env, e->as.getfield.target, ok);
+            if (!*ok) return cs_nil();
+
+            if (target.type == CS_T_NIL) {
+                cs_value_release(target);
+                return cs_nil();
+            }
+
+            cs_value out = cs_nil();
+            if (target.type == CS_T_MAP) {
+                out = map_get_cstr(as_map(target), e->as.getfield.field);
             } else {
                 vm_set_err(vm, "field access expects map", e->source_name, e->line, e->col);
                 *ok = 0;
@@ -1572,7 +1956,140 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
                             *ok = 0;
                         }
                     } else if (self.type == CS_T_MAP) {
-                        cs_value f = map_get(as_map(self), field);
+                        cs_value f = map_get_cstr(as_map(self), field);
+                        if (f.type == CS_T_NATIVE) {
+                            cs_native* nf = as_native(f);
+                            vm_frames_push(vm, field, e->source_name, e->line, e->col);
+                            if (nf->fn(vm, nf->userdata, argc0, argv0, &out) != 0) {
+                                if (!vm->last_error) vm_set_err(vm, "native call failed", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            }
+                            vm_frames_pop(vm);
+                        } else if (f.type == CS_T_FUNC) {
+                            struct cs_func* fn = as_func(f);
+                            cs_env* callenv = env_new(fn->closure);
+                            if (!callenv) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; }
+
+                            if (*ok) {
+                                if ((size_t)argc0 != fn->param_count) {
+                                    vm_set_err(vm, "wrong argument count", e->source_name, e->line, e->col);
+                                    *ok = 0;
+                                } else {
+                                    vm_frames_push(vm, field, e->source_name, e->line, e->col);
+                                    for (size_t i = 0; i < fn->param_count; i++) env_set_here(callenv, fn->params[i], argv0[i]);
+                                    exec_result r = exec_block(vm, callenv, fn->body);
+                                    if (r.did_throw) {
+                                        vm_set_pending_throw(vm, r.thrown);
+                                        r.thrown = cs_nil();
+                                        *ok = 0;
+                                    } else if (r.did_break) {
+                                        vm_set_err(vm, "break used outside of a loop", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                    } else if (r.did_continue) {
+                                        vm_set_err(vm, "continue used outside of a loop", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                    } else if (!r.ok) {
+                                        *ok = 0;
+                                    } else if (r.did_return) {
+                                        out = cs_value_copy(r.ret);
+                                    }
+                                    cs_value_release(r.ret);
+                                    cs_value_release(r.thrown);
+                                    if (!r.did_throw) vm_frames_pop(vm);
+                                }
+                            }
+                            env_decref(callenv);
+                        } else {
+                            vm_set_err(vm, "attempted to call non-function", e->source_name, e->line, e->col);
+                            *ok = 0;
+                        }
+                        cs_value_release(f);
+                    } else {
+                        vm_set_err(vm, "method call expects map or strbuf", e->source_name, e->line, e->col);
+                        *ok = 0;
+                    }
+                }
+
+                if (argv0) { for (int i = 0; i < argc0; i++) cs_value_release(argv0[i]); free(argv0); }
+                cs_value_release(self);
+                return out;
+            }
+
+            // Optional chaining call: `obj?.method(a,b)` where callee is OPTGETFIELD.
+            if (e->as.call.callee && e->as.call.callee->type == N_OPTGETFIELD) {
+                ast* gf = e->as.call.callee;
+                const char* field = gf->as.getfield.field;
+
+                cs_value self = eval_expr(vm, env, gf->as.getfield.target, ok);
+                if (!*ok) return cs_nil();
+
+                if (self.type == CS_T_NIL) {
+                    cs_value_release(self);
+                    return cs_nil();
+                }
+
+                int argc0 = (int)e->as.call.argc;
+                cs_value* argv0 = NULL;
+                if (argc0 > 0) {
+                    argv0 = (cs_value*)calloc((size_t)argc0, sizeof(cs_value));
+                    if (!argv0) { cs_value_release(self); vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+                    for (int i = 0; i < argc0; i++) {
+                        argv0[i] = eval_expr(vm, env, e->as.call.args[i], ok);
+                        if (!*ok) break;
+                    }
+                }
+
+                cs_value out = cs_nil();
+                if (*ok) {
+                    if (self.type == CS_T_STRBUF) {
+                        cs_strbuf_obj* b = as_strbuf(self);
+                        if (strcmp(field, "append") == 0) {
+                            if (argc0 != 1) {
+                                vm_set_err(vm, "strbuf.append expects 1 argument", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                cs_value v = argv0[0];
+                                int ok2 = 1;
+                                if (v.type == CS_T_STR) ok2 = strbuf_append_bytes(b, as_str(v)->data, as_str(v)->len);
+                                else if (v.type == CS_T_INT) ok2 = strbuf_append_int(b, v.as.i);
+                                else if (v.type == CS_T_BOOL) ok2 = strbuf_append_bytes(b, v.as.b ? "true" : "false", v.as.b ? 4 : 5);
+                                else if (v.type == CS_T_NIL) ok2 = strbuf_append_bytes(b, "nil", 3);
+                                else ok2 = 0;
+                                if (!ok2) { vm_set_err(vm, "strbuf.append failed", e->source_name, e->line, e->col); *ok = 0; }
+                            }
+                        } else if (strcmp(field, "str") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "strbuf.str expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                char* copy = (char*)malloc(b->len + 1);
+                                if (!copy) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; }
+                                else {
+                                    memcpy(copy, b->data, b->len + 1);
+                                    out = cs_str_take(vm, copy, (uint64_t)b->len);
+                                }
+                            }
+                        } else if (strcmp(field, "clear") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "strbuf.clear expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                b->len = 0;
+                                if (b->data) b->data[0] = 0;
+                            }
+                        } else if (strcmp(field, "len") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "strbuf.len expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                out = cs_int((int64_t)b->len);
+                            }
+                        } else {
+                            vm_set_err(vm, "unknown strbuf method", e->source_name, e->line, e->col);
+                            *ok = 0;
+                        }
+                    } else if (self.type == CS_T_MAP) {
+                        cs_value f = map_get_cstr(as_map(self), field);
                         if (f.type == CS_T_NATIVE) {
                             cs_native* nf = as_native(f);
                             vm_frames_push(vm, field, e->source_name, e->line, e->col);
@@ -1726,11 +2243,42 @@ static exec_result exec_block(cs_vm* vm, cs_env* env, ast* b) {
 
     if (!b || b->type != N_BLOCK) return r;
 
+    size_t defer_cap = 0;
+    size_t defer_count = 0;
+    ast** defers = NULL;
+
+    exec_result base = r;
+
     for (size_t i = 0; i < b->as.block.count; i++) {
-        r = exec_stmt(vm, env, b->as.block.items[i]);
-        if (!r.ok || r.did_return || r.did_break || r.did_continue || r.did_throw) return r;
+        ast* stmt = b->as.block.items[i];
+        if (stmt && stmt->type == N_DEFER) {
+            if (defer_count == defer_cap) {
+                defer_cap = defer_cap ? defer_cap * 2 : 4;
+                defers = (ast**)realloc(defers, sizeof(ast*) * defer_cap);
+            }
+            if (!defers) {
+                vm_set_err(vm, "out of memory", stmt->source_name, stmt->line, stmt->col);
+                base.ok = 0;
+                break;
+            }
+            defers[defer_count++] = stmt->as.defer_stmt.stmt;
+            continue;
+        }
+
+        base = exec_stmt(vm, env, stmt);
+        if (!base.ok || base.did_return || base.did_break || base.did_continue || base.did_throw) break;
     }
-    return r;
+
+    for (size_t i = defer_count; i > 0; i--) {
+        exec_result dr = exec_stmt(vm, env, defers[i - 1]);
+        if (!dr.ok || dr.did_return || dr.did_break || dr.did_continue || dr.did_throw) {
+            free(defers);
+            return dr;
+        }
+    }
+
+    free(defers);
+    return base;
 }
 
 static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
@@ -1745,6 +2293,10 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
     if (!s) return r;
 
     switch (s->type) {
+        case N_DEFER: {
+            return r;
+        }
+
         case N_BLOCK: {
             cs_env* inner = env_new(env);
             if (!inner) { vm_set_err(vm, "out of memory", s->source_name, s->line, s->col); r.ok = 0; return r; }
@@ -1764,7 +2316,59 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                     return r;
                 }
             }
-            env_set_here(env, s->as.let_stmt.name, v);
+            if (s->as.let_stmt.pattern) {
+                if (!s->as.let_stmt.init) {
+                    cs_value_release(v);
+                    vm_set_err(vm, "destructuring requires initializer", s->source_name, s->line, s->col);
+                    r.ok = 0;
+                    return r;
+                }
+
+                ast* pat = s->as.let_stmt.pattern;
+                if (pat->type == N_PATTERN_LIST) {
+                    if (v.type != CS_T_LIST) {
+                        cs_value_release(v);
+                        vm_set_err(vm, "list destructuring expects list", s->source_name, s->line, s->col);
+                        r.ok = 0;
+                        return r;
+                    }
+                    cs_list_obj* l = as_list(v);
+                    for (size_t i = 0; i < pat->as.list_pattern.count; i++) {
+                        const char* name = pat->as.list_pattern.names[i];
+                        if (name && strcmp(name, "_") == 0) continue;
+                        cs_value item = cs_nil();
+                        if (l && i < l->len) item = cs_value_copy(l->items[i]);
+                        env_set_here(env, name, item);
+                        cs_value_release(item);
+                    }
+                } else if (pat->type == N_PATTERN_MAP) {
+                    if (v.type != CS_T_MAP) {
+                        cs_value_release(v);
+                        vm_set_err(vm, "map destructuring expects map", s->source_name, s->line, s->col);
+                        r.ok = 0;
+                        return r;
+                    }
+                    cs_map_obj* m = as_map(v);
+                    for (size_t i = 0; i < pat->as.map_pattern.count; i++) {
+                        const char* key = pat->as.map_pattern.keys[i];
+                        const char* name = pat->as.map_pattern.names[i];
+                        if (name && strcmp(name, "_") == 0) continue;
+                        cs_value item = cs_nil();
+                        if (m) item = map_get_cstr(m, key);
+                        env_set_here(env, name, item);
+                        cs_value_release(item);
+                    }
+                }
+
+                cs_value_release(v);
+                return r;
+            }
+
+            if (s->as.let_stmt.is_const) {
+                env_set_here_ex(env, s->as.let_stmt.name, v, 1);
+            } else {
+                env_set_here(env, s->as.let_stmt.name, v);
+            }
             cs_value_release(v);
             return r;
         }
@@ -1776,6 +2380,12 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                 rhs->as.binop.left && rhs->as.binop.left->type == N_IDENT &&
                 rhs->as.binop.left->as.ident.name &&
                 strcmp(rhs->as.binop.left->as.ident.name, s->as.assign_stmt.name) == 0) {
+
+                if (env_is_const(env, s->as.assign_stmt.name)) {
+                    vm_set_err(vm, "assignment to const variable", s->source_name, s->line, s->col);
+                    r.ok = 0;
+                    return r;
+                }
 
                 cs_value* slot = env_get_slot(env, s->as.assign_stmt.name);
                 if (slot && slot->type == CS_T_STR) {
@@ -1823,9 +2433,14 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                 r.ok = 0;
                 return r;
             }
-            if (!env_assign_existing(env, s->as.assign_stmt.name, v)) {
+            int ar = env_assign_existing(env, s->as.assign_stmt.name, v);
+            if (ar <= 0) {
                 cs_value_release(v);
-                vm_set_err(vm, "assignment to undefined variable", s->source_name, s->line, s->col);
+                if (ar < 0) {
+                    vm_set_err(vm, "assignment to const variable", s->source_name, s->line, s->col);
+                } else {
+                    vm_set_err(vm, "assignment to undefined variable", s->source_name, s->line, s->col);
+                }
                 r.ok = 0;
                 return r;
             }
@@ -1848,24 +2463,70 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                 r.ok = 0;
                 return r;
             }
-            cs_value value = eval_expr(vm, env, s->as.setindex_stmt.value, &ok);
-            if (!ok) {
-                cs_value_release(target);
-                cs_value_release(index);
-                if (exec_take_vm_throw(vm, &r)) return r;
-                r.ok = 0;
-                return r;
+            cs_value value = cs_nil();
+            if (s->as.setindex_stmt.op == TK_ASSIGN) {
+                value = eval_expr(vm, env, s->as.setindex_stmt.value, &ok);
+                if (!ok) {
+                    cs_value_release(target);
+                    cs_value_release(index);
+                    if (exec_take_vm_throw(vm, &r)) return r;
+                    r.ok = 0;
+                    return r;
+                }
+            } else {
+                cs_value rhs = eval_expr(vm, env, s->as.setindex_stmt.value, &ok);
+                if (!ok) {
+                    cs_value_release(target);
+                    cs_value_release(index);
+                    if (exec_take_vm_throw(vm, &r)) return r;
+                    r.ok = 0;
+                    return r;
+                }
+
+                cs_value current = cs_nil();
+                if (target.type == CS_T_LIST && index.type == CS_T_INT) {
+                    current = list_get(as_list(target), index.as.i);
+                } else if (target.type == CS_T_MAP) {
+                    current = map_get_value(as_map(target), index);
+                } else {
+                    cs_value_release(rhs);
+                    cs_value_release(target);
+                    cs_value_release(index);
+                    vm_set_err(vm, "index assignment expects list[int] or map[key]", s->source_name, s->line, s->col);
+                    r.ok = 0;
+                    return r;
+                }
+
+                ast tmp;
+                memset(&tmp, 0, sizeof(tmp));
+                tmp.type = N_BINOP;
+                tmp.source_name = s->source_name;
+                tmp.line = s->line;
+                tmp.col = s->col;
+                tmp.as.binop.op = s->as.setindex_stmt.op == TK_PLUSEQ ? TK_PLUS :
+                                 s->as.setindex_stmt.op == TK_MINUSEQ ? TK_MINUS :
+                                 s->as.setindex_stmt.op == TK_STAREQ ? TK_STAR :
+                                 TK_SLASH;
+                value = eval_binop(vm, &tmp, current, rhs, &ok);
+                cs_value_release(current);
+                cs_value_release(rhs);
+                if (!ok) {
+                    cs_value_release(target);
+                    cs_value_release(index);
+                    r.ok = 0;
+                    return r;
+                }
             }
 
             int wrote = 0;
             if (target.type == CS_T_LIST && index.type == CS_T_INT) {
                 wrote = list_set(as_list(target), index.as.i, value);
                 if (!wrote) vm_set_err(vm, "list index assignment failed", s->source_name, s->line, s->col);
-            } else if (target.type == CS_T_MAP && index.type == CS_T_STR) {
-                wrote = map_set(as_map(target), as_str(index), value);
+            } else if (target.type == CS_T_MAP) {
+                wrote = map_set_value(as_map(target), index, value);
                 if (!wrote) vm_set_err(vm, "map assignment failed", s->source_name, s->line, s->col);
             } else {
-                vm_set_err(vm, "index assignment expects list[int] or map[string]", s->source_name, s->line, s->col);
+                vm_set_err(vm, "index assignment expects list[int] or map[key]", s->source_name, s->line, s->col);
             }
 
             cs_value_release(target);
@@ -2014,11 +2675,8 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
             } else if (it.type == CS_T_MAP) {
                 cs_map_obj* m = as_map(it);
                 for (size_t i = 0; m && i < m->cap; i++) {
-                    if (!m->entries[i].key) continue;
-                    cs_value keyv;
-                    keyv.type = CS_T_STR;
-                    keyv.as.p = m->entries[i].key;
-                    cs_str_incref(m->entries[i].key);
+                    if (!m->entries[i].in_use) continue;
+                    cs_value keyv = cs_value_copy(m->entries[i].key);
                     env_set_here(loopenv, s->as.forin_stmt.name, keyv);
                     cs_value_release(keyv);
 
@@ -2163,6 +2821,17 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
             return r;
         }
 
+        case N_EXPR_STMT: {
+            int ok = 1;
+            cs_value v = eval_expr(vm, env, s->as.expr_stmt.expr, &ok);
+            cs_value_release(v);
+            if (!ok) {
+                if (exec_take_vm_throw(vm, &r)) return r;
+                r.ok = 0;
+            }
+            return r;
+        }
+
         case N_BREAK: {
             r.did_break = 1;
             return r;
@@ -2183,6 +2852,117 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
             }
             r.did_throw = 1;
             r.thrown = v; // already a new value
+            return r;
+        }
+
+        case N_EXPORT: {
+            cs_value exports = cs_nil();
+            if (!get_exports_map(vm, env, s, &exports)) {
+                r.ok = 0;
+                return r;
+            }
+
+            int ok = 1;
+            cs_value v = eval_expr(vm, env, s->as.export_stmt.value, &ok);
+            if (!ok) {
+                cs_value_release(exports);
+                if (exec_take_vm_throw(vm, &r)) return r;
+                r.ok = 0;
+                return r;
+            }
+
+            if (cs_map_set(exports, s->as.export_stmt.name, v) != 0) {
+                cs_value_release(v);
+                cs_value_release(exports);
+                vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                r.ok = 0;
+                return r;
+            }
+
+            cs_value_release(v);
+            cs_value_release(exports);
+            return r;
+        }
+
+        case N_EXPORT_LIST: {
+            cs_value exports = cs_nil();
+            if (!get_exports_map(vm, env, s, &exports)) {
+                r.ok = 0;
+                return r;
+            }
+
+            for (size_t i = 0; i < s->as.export_list.count; i++) {
+                const char* local = s->as.export_list.local_names[i];
+                const char* name = s->as.export_list.export_names[i];
+                cs_value v = cs_nil();
+                if (!env_get(env, local, &v)) {
+                    if (cs_map_has(exports, local)) {
+                        v = cs_map_get(exports, local);
+                    } else {
+                        cs_value_release(exports);
+                        vm_set_err(vm, "export name not defined", s->source_name, s->line, s->col);
+                        r.ok = 0;
+                        return r;
+                    }
+                }
+                if (cs_map_set(exports, name, v) != 0) {
+                    cs_value_release(v);
+                    cs_value_release(exports);
+                    vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                    r.ok = 0;
+                    return r;
+                }
+                cs_value_release(v);
+            }
+
+            cs_value_release(exports);
+            return r;
+        }
+
+        case N_IMPORT: {
+            int ok = 1;
+            cs_value path_val = eval_expr(vm, env, s->as.import_stmt.path, &ok);
+            if (!ok) {
+                if (exec_take_vm_throw(vm, &r)) return r;
+                r.ok = 0;
+                return r;
+            }
+
+            if (path_val.type != CS_T_STR) {
+                cs_value_release(path_val);
+                vm_set_err(vm, "import expects string path", s->source_name, s->line, s->col);
+                r.ok = 0;
+                return r;
+            }
+
+            cs_value exports = cs_nil();
+            if (cs_call(vm, "require", 1, &path_val, &exports) != 0) {
+                cs_value_release(path_val);
+                r.ok = 0;
+                return r;
+            }
+            cs_value_release(path_val);
+
+            if (exports.type != CS_T_MAP) {
+                cs_value_release(exports);
+                vm_set_err(vm, "import target is not a map", s->source_name, s->line, s->col);
+                r.ok = 0;
+                return r;
+            }
+
+            if (s->as.import_stmt.default_name) {
+                env_set_here(env, s->as.import_stmt.default_name, exports);
+            }
+
+            for (size_t i = 0; i < s->as.import_stmt.count; i++) {
+                const char* import_name = s->as.import_stmt.import_names[i];
+                const char* local_name = s->as.import_stmt.local_names[i];
+                cs_value v = cs_map_get(exports, import_name);
+                env_set_here(env, local_name, v);
+                cs_value_release(v);
+            }
+
+            cs_value_release(exports);
             return r;
         }
 
@@ -2226,66 +3006,11 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
             return result;
         }
 
-        case N_EXPR_STMT: {
-            int ok = 1;
-            cs_value v = eval_expr(vm, env, s->as.expr_stmt.expr, &ok);
-            if (!ok) {
-                if (exec_take_vm_throw(vm, &r)) return r;
-                r.ok = 0;
-                return r;
-            }
-            cs_value_release(v);
-            return r;
-        }
-
         default:
             vm_set_err(vm, "invalid statement node", s->source_name, s->line, s->col);
             r.ok = 0;
             return r;
     }
-}
-
-// ---------- public API ----------
-cs_vm* cs_vm_new(void) {
-    cs_vm* vm = (cs_vm*)calloc(1, sizeof(cs_vm));
-    if (!vm) return NULL;
-    vm->tracked = NULL;
-    vm->tracked_count = 0;
-    vm->asts = NULL;
-    vm->ast_count = 0;
-    vm->ast_cap = 0;
-    vm->globals = env_new(NULL);
-    vm->last_error = NULL;
-    vm->pending_throw = 0;
-    vm->pending_thrown = cs_nil();
-    vm->frames = NULL;
-    vm->frame_count = 0;
-    vm->frame_cap = 0;
-    vm->sources = NULL;
-    vm->source_count = 0;
-    vm->source_cap = 0;
-    vm->dir_stack = NULL;
-    vm->dir_count = 0;
-    vm->dir_cap = 0;
-    vm->modules = NULL;
-    vm->module_count = 0;
-    vm->module_cap = 0;
-    
-    // Initialize GC auto-collect policy
-    vm->gc_threshold = 0;          // disabled by default
-    vm->gc_allocations = 0;
-    vm->gc_alloc_trigger = 0;      // disabled by default
-    vm->gc_collections = 0;
-    vm->gc_objects_collected = 0;
-    
-    // Initialize safety controls
-    vm->instruction_count = 0;
-    vm->instruction_limit = 0;     // unlimited by default
-    vm->exec_start_ms = 0;
-    vm->exec_timeout_ms = 0;       // unlimited by default
-    vm->interrupt_requested = 0;
-    
-    return vm;
 }
 
 void cs_vm_free(cs_vm* vm) {
@@ -2515,8 +3240,16 @@ size_t cs_vm_collect_cycles(cs_vm* vm) {
         } else if (items[i].type == CS_TRACK_MAP) {
             cs_map_obj* m = (cs_map_obj*)items[i].ptr;
             for (size_t j = 0; m && j < m->cap; j++) {
-                if (!m->entries[j].key) continue;
+                if (!m->entries[j].in_use) continue;
+                cs_value k = m->entries[j].key;
                 cs_value v = m->entries[j].val;
+                if (k.type == CS_T_LIST) {
+                    size_t kk = gc_find_index(keys, types, vals, cap, CS_TRACK_LIST, k.as.p);
+                    if (kk != (size_t)-1) items[kk].gc_refs--;
+                } else if (k.type == CS_T_MAP) {
+                    size_t kk = gc_find_index(keys, types, vals, cap, CS_TRACK_MAP, k.as.p);
+                    if (kk != (size_t)-1) items[kk].gc_refs--;
+                }
                 if (v.type == CS_T_LIST) {
                     size_t k = gc_find_index(keys, types, vals, cap, CS_TRACK_LIST, v.as.p);
                     if (k != (size_t)-1) items[k].gc_refs--;
@@ -2556,8 +3289,16 @@ size_t cs_vm_collect_cycles(cs_vm* vm) {
         } else if (items[i].type == CS_TRACK_MAP) {
             cs_map_obj* m = (cs_map_obj*)items[i].ptr;
             for (size_t j = 0; m && j < m->cap; j++) {
-                if (!m->entries[j].key) continue;
+                if (!m->entries[j].in_use) continue;
+                cs_value k = m->entries[j].key;
                 cs_value v = m->entries[j].val;
+                if (k.type == CS_T_LIST) {
+                    size_t kk = gc_find_index(keys, types, vals, cap, CS_TRACK_LIST, k.as.p);
+                    if (kk != (size_t)-1 && !items[kk].marked) { items[kk].marked = 1; stack[sp++] = kk; }
+                } else if (k.type == CS_T_MAP) {
+                    size_t kk = gc_find_index(keys, types, vals, cap, CS_TRACK_MAP, k.as.p);
+                    if (kk != (size_t)-1 && !items[kk].marked) { items[kk].marked = 1; stack[sp++] = kk; }
+                }
                 if (v.type == CS_T_LIST) {
                     size_t k = gc_find_index(keys, types, vals, cap, CS_TRACK_LIST, v.as.p);
                     if (k != (size_t)-1 && !items[k].marked) { items[k].marked = 1; stack[sp++] = k; }
@@ -2594,8 +3335,8 @@ size_t cs_vm_collect_cycles(cs_vm* vm) {
         } else if (items[i].type == CS_TRACK_MAP) {
             cs_map_obj* m = (cs_map_obj*)items[i].ptr;
             for (size_t j = 0; m && j < m->cap; j++) {
-                if (!m->entries[j].key) continue;
-                cs_str_decref(m->entries[j].key);
+                if (!m->entries[j].in_use) continue;
+                cs_value_release(m->entries[j].key);
                 cs_value v = m->entries[j].val;
                 int is_garbage = 0;
                 if (v.type == CS_T_LIST) {
@@ -2606,8 +3347,9 @@ size_t cs_vm_collect_cycles(cs_vm* vm) {
                     is_garbage = (k != (size_t)-1 && !items[k].marked);
                 }
                 if (!is_garbage) cs_value_release(v);
-                m->entries[j].key = NULL;
+                m->entries[j].key = cs_nil();
                 m->entries[j].val = cs_nil();
+                m->entries[j].in_use = 0;
             }
             free(m->entries);
             vm_track_remove(vm, CS_TRACK_MAP, m);
@@ -3033,18 +3775,14 @@ cs_value cs_map_get(cs_value map_val, const char* key) {
     if (map_val.type != CS_T_MAP || !key) return cs_nil();
     cs_map_obj* map = as_map(map_val);
     if (!map) return cs_nil();
-    return map_get(map, key);
+    return map_get_cstr(map, key);
 }
 
 int cs_map_set(cs_value map_val, const char* key, cs_value value) {
     if (map_val.type != CS_T_MAP || !key) return -1;
     cs_map_obj* map = as_map(map_val);
     if (!map) return -1;
-    
-    cs_string* key_str = cs_str_new(key);
-    if (!key_str) return -1;
-    int result = map_set(map, key_str, value);
-    cs_str_decref(key_str);
+    int result = map_set_cstr(map, key, value);
     return result ? 0 : -1;
 }
 
@@ -3052,36 +3790,52 @@ int cs_map_has(cs_value map_val, const char* key) {
     if (map_val.type != CS_T_MAP || !key) return 0;
     cs_map_obj* map = as_map(map_val);
     if (!map) return 0;
-    return (map_find(map, key) >= 0) ? 1 : 0;
+    cs_string* key_str = cs_str_new(key);
+    if (!key_str) return 0;
+    cs_value kv; kv.type = CS_T_STR; kv.as.p = key_str;
+    int ok = map_has_value(map, kv);
+    cs_str_decref(key_str);
+    return ok;
 }
 
 int cs_map_del(cs_value map_val, const char* key) {
     if (map_val.type != CS_T_MAP || !key) return -1;
     cs_map_obj* map = as_map(map_val);
     if (!map) return -1;
-    
-    int idx = map_find(map, key);
-    if (idx < 0) return -1;
+    cs_string* key_str = cs_str_new(key);
+    if (!key_str) return -1;
+    cs_value kv; kv.type = CS_T_STR; kv.as.p = key_str;
+    int ok = map_del_value(map, kv);
+    cs_str_decref(key_str);
+    return ok ? 0 : -1;
+}
 
-    cs_map_entry* ne = (cs_map_entry*)calloc(map->cap, sizeof(cs_map_entry));
-    if (!ne) return -1;
+cs_value cs_map_get_value(cs_value map_val, cs_value key) {
+    if (map_val.type != CS_T_MAP) return cs_nil();
+    cs_map_obj* map = as_map(map_val);
+    if (!map) return cs_nil();
+    return map_get_value(map, key);
+}
 
-    for (size_t i = 0; i < map->cap; i++) {
-        if (!map->entries[i].key) continue;
-        if ((int)i == idx) continue;
-        uint32_t h = hash_key(map->entries[i].key->data);
-        size_t pos = h % map->cap;
-        while (ne[pos].key != NULL) pos = (pos + 1) % map->cap;
-        ne[pos] = map->entries[i];
-    }
+int cs_map_set_value(cs_value map_val, cs_value key, cs_value value) {
+    if (map_val.type != CS_T_MAP) return -1;
+    cs_map_obj* map = as_map(map_val);
+    if (!map) return -1;
+    return map_set_value(map, key, value) ? 0 : -1;
+}
 
-    cs_str_decref(map->entries[idx].key);
-    cs_value_release(map->entries[idx].val);
+int cs_map_has_value(cs_value map_val, cs_value key) {
+    if (map_val.type != CS_T_MAP) return 0;
+    cs_map_obj* map = as_map(map_val);
+    if (!map) return 0;
+    return map_has_value(map, key);
+}
 
-    free(map->entries);
-    map->entries = ne;
-    if (map->len) map->len--;
-    return 0;
+int cs_map_del_value(cs_value map_val, cs_value key) {
+    if (map_val.type != CS_T_MAP) return -1;
+    cs_map_obj* map = as_map(map_val);
+    if (!map) return -1;
+    return map_del_value(map, key) ? 0 : -1;
 }
 
 cs_value cs_map_keys(cs_vm* vm, cs_value map_val) {
@@ -3095,12 +3849,8 @@ cs_value cs_map_keys(cs_vm* vm, cs_value map_val) {
     
     if (!list_ensure(list, map->len)) { cs_value_release(list_val); return cs_nil(); }
     for (size_t i = 0; i < map->cap; i++) {
-        if (!map->entries[i].key) continue;
-        cs_value sv;
-        sv.type = CS_T_STR;
-        sv.as.p = map->entries[i].key;
-        cs_str_incref(map->entries[i].key);
-        list->items[list->len++] = sv;
+        if (!map->entries[i].in_use) continue;
+        list->items[list->len++] = cs_value_copy(map->entries[i].key);
     }
     
     return list_val;

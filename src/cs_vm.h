@@ -10,6 +10,7 @@ typedef struct cs_env {
     struct cs_env* parent;
     char** keys;
     cs_value* vals;
+    unsigned char* is_const;
     size_t count;
     size_t cap;
 } cs_env;

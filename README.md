@@ -109,6 +109,7 @@ return expr;
 
 throw expr;
 try { ... } catch (e) { ... } finally { ... }
+export name = expr; // module exports
 switch (expr) { case 1 { ... } default { ... } }
 ```
 
@@ -141,7 +142,7 @@ print(xs[0], xs[1], len(xs)); // 10 99 2
 
 let m = { "name": "cupid" };
 print(m["name"]);             // cupid
-print(keys(m));               // list of string keys
+print(keys(m));               // list of keys
 ```
 
 List helpers:
@@ -168,8 +169,7 @@ state["bindings"] = list();
 push(state["bindings"], "F5");
 ```
 
-Current limitations (by design, for v0 simplicity):
-- Map keys are strings only (use `m["key"]` / `mset(m, "key", v)`).
+Map keys can be any value; equality follows the same rules as `==` (so `1` and `1.0` collide).
 
 ### Multi-file scripts
 
@@ -185,7 +185,7 @@ Module pattern:
 
 ```cs
 // lib.cs
-exports.hello = fn(name) { return "hello " + name; };
+export hello = fn(name) { return "hello " + name; };
 
 // main.cs
 let lib = require("lib.cs");

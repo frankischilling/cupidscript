@@ -5,11 +5,56 @@
 static char peek(lexer* L) { return L->src[L->pos]; }
 static char peek2(lexer* L) { return L->src[L->pos + 1]; }
 
+static token make_tok(lexer* L, token_type t, const char* start, size_t len, long long iv, int line, int col);
+
 static char advance(lexer* L) {
     char c = L->src[L->pos++];
     if (c == '\n') { L->line++; L->col = 1; }
     else L->col++;
     return c;
+}
+
+static int string_has_interpolation(const lexer* L) {
+    if (!L || !L->src) return 0;
+    size_t i = L->pos + 1; // after opening quote
+    while (L->src[i]) {
+        char c = L->src[i];
+        if (c == '\\' && L->src[i + 1]) { i += 2; continue; }
+        if (c == '"') return 0; // end of string, no interpolation found
+        if (c == '$' && L->src[i + 1] == '{') return 1;
+        i++;
+    }
+    return 0;
+}
+
+static token lex_string_part(lexer* L) {
+    const char* start = &L->src[L->pos];
+    int line = L->line;
+    int col  = L->col;
+
+    while (peek(L)) {
+        char c = peek(L);
+        if (c == '"') {
+            L->mode = 3; // string_end
+            break;
+        }
+        if (c == '$' && peek2(L) == '{') {
+            L->mode = 4; // interp_start
+            break;
+        }
+        if (c == '\\' && peek2(L)) { advance(L); advance(L); continue; }
+        advance(L);
+    }
+
+    if (!peek(L) && L->mode != 3 && L->mode != 4) {
+        return make_tok(L, TK_ERR, start, (size_t)(&L->src[L->pos] - start), 0, line, col);
+    }
+
+    size_t len = (size_t)(&L->src[L->pos] - start);
+    return make_tok(L, TK_STR_PART, start, len, 0, line, col);
+
+    // unreachable, but keeps compiler happy
+    return make_tok(L, TK_ERR, start, 0, 0, line, col);
 }
 
 static int skip_ws_and_comments(lexer* L, const char** err_start, size_t* err_len, int* err_line, int* err_col) {
@@ -69,6 +114,12 @@ static int is_ident_char(char c)  { return isalnum((unsigned char)c) || c == '_'
 
 static token_type keyword_type(const char* s, size_t n) {
     if (n == 3 && memcmp(s, "let", 3) == 0) return TK_LET;
+    if (n == 5 && memcmp(s, "const", 5) == 0) return TK_CONST;
+    if (n == 5 && memcmp(s, "match", 5) == 0) return TK_MATCH;
+    if (n == 5 && memcmp(s, "defer", 5) == 0) return TK_DEFER;
+    if (n == 6 && memcmp(s, "import", 6) == 0) return TK_IMPORT;
+    if (n == 4 && memcmp(s, "from", 4) == 0) return TK_FROM;
+    if (n == 2 && memcmp(s, "as", 2) == 0) return TK_AS;
     if (n == 2 && memcmp(s, "fn", 2) == 0) return TK_FN;
     if (n == 2 && memcmp(s, "if", 2) == 0) return TK_IF;
     if (n == 4 && memcmp(s, "else", 4) == 0) return TK_ELSE;
@@ -85,6 +136,7 @@ static token_type keyword_type(const char* s, size_t n) {
     if (n == 3 && memcmp(s, "try", 3) == 0) return TK_TRY;
     if (n == 5 && memcmp(s, "catch", 5) == 0) return TK_CATCH;
     if (n == 7 && memcmp(s, "finally", 7) == 0) return TK_FINALLY;
+    if (n == 6 && memcmp(s, "export", 6) == 0) return TK_EXPORT;
     if (n == 4 && memcmp(s, "true", 4) == 0) return TK_TRUE;
     if (n == 5 && memcmp(s, "false", 5) == 0) return TK_FALSE;
     if (n == 3 && memcmp(s, "nil", 3) == 0) return TK_NIL;
@@ -97,9 +149,37 @@ void lex_init(lexer* L, const char* src) {
     L->line = 1;
     L->col = 1;
     L->current.type = TK_EOF;
+    L->mode = 0;
+    L->interp_depth = 0;
 }
 
 token lex_next(lexer* L) {
+    if (L->mode == 3) { // string_end
+        const char* start = &L->src[L->pos];
+        int line = L->line;
+        int col  = L->col;
+        if (peek(L) == '"') advance(L);
+        L->mode = 0;
+        return make_tok(L, TK_STR_END, start, 0, 0, line, col);
+    }
+
+    if (L->mode == 4) { // interp_start
+        const char* start = &L->src[L->pos];
+        int line = L->line;
+        int col  = L->col;
+        if (peek(L) == '$' && peek2(L) == '{') {
+            advance(L); advance(L);
+            L->mode = 2;
+            L->interp_depth = 0;
+            return make_tok(L, TK_INTERP_START, start, 2, 0, line, col);
+        }
+        return make_tok(L, TK_ERR, start, 0, 0, line, col);
+    }
+
+    if (L->mode == 1) { // string
+        return lex_string_part(L);
+    }
+
     const char* err_start = NULL;
     size_t err_len = 0;
     int err_line = 0;
@@ -113,6 +193,14 @@ token lex_next(lexer* L) {
 
     char c = peek(L);
     if (!c) return make_tok(L, TK_EOF, start, 0, 0, line, col);
+
+    if (L->mode == 2) { // interp
+        if (c == '}' && L->interp_depth == 0) {
+            advance(L);
+            L->mode = 1; // back to string
+            return make_tok(L, TK_INTERP_END, start, 1, 0, line, col);
+        }
+    }
 
     // numbers (decimal with underscores, hex 0xFF, or floats 3.14)
     if (isdigit((unsigned char)c)) {
@@ -204,8 +292,13 @@ token lex_next(lexer* L) {
         return make_tok(L, kt, start, len, 0, line, col);
     }
 
-    // strings
+    // strings (with optional interpolation)
     if (c == '"') {
+        if (string_has_interpolation(L)) {
+            advance(L); // opening
+            L->mode = 1; // string
+            return lex_string_part(L);
+        }
         advance(L); // opening
         while (peek(L) && peek(L) != '"') {
             if (peek(L) == '\\' && peek2(L)) { advance(L); advance(L); continue; }
@@ -219,6 +312,20 @@ token lex_next(lexer* L) {
         return make_tok(L, TK_STR, start, len, 0, line, col);
     }
 
+    // raw/multiline strings (backtick literals, no escapes)
+    if (c == '`') {
+        advance(L); // opening
+        while (peek(L) && peek(L) != '`') {
+            advance(L);
+        }
+        if (peek(L) != '`') {
+            return make_tok(L, TK_ERR, start, (size_t)(&L->src[L->pos] - start), 0, line, col);
+        }
+        advance(L); // closing
+        size_t len = (size_t)(&L->src[L->pos] - start);
+        return make_tok(L, TK_RAW_STR, start, len, 0, line, col);
+    }
+
     // operators / punctuation
     advance(L);
     token_type t = TK_ERR;
@@ -227,8 +334,14 @@ token lex_next(lexer* L) {
         case ')': t = TK_RPAREN; break;
         case '[': t = TK_LBRACKET; break;
         case ']': t = TK_RBRACKET; break;
-        case '{': t = TK_LBRACE; break;
-        case '}': t = TK_RBRACE; break;
+        case '{':
+            t = TK_LBRACE;
+            if (L->mode == 2) L->interp_depth++;
+            break;
+        case '}':
+            t = TK_RBRACE;
+            if (L->mode == 2 && L->interp_depth > 0) L->interp_depth--;
+            break;
         case ',': t = TK_COMMA; break;
         case ';': t = TK_SEMI; break;
         case '.':
@@ -246,7 +359,11 @@ token lex_next(lexer* L) {
             }
             break;
         case ':': t = TK_COLON; break;
-        case '?': t = TK_QMARK; break;
+        case '?':
+            if (peek(L) == '?') { advance(L); t = TK_QQ; }
+            else if (peek(L) == '.') { advance(L); t = TK_QDOT; }
+            else t = TK_QMARK;
+            break;
 
         case '+':
             if (peek(L) == '=') { advance(L); t = TK_PLUSEQ; }

@@ -14,10 +14,15 @@ typedef enum {
     N_BREAK,
     N_CONTINUE,
     N_SWITCH,
+    N_MATCH,
+    N_DEFER,
+    N_IMPORT,
+    N_EXPORT_LIST,
     N_FORIN,
     N_FOR_C_STYLE,
     N_THROW,
     N_TRY,
+    N_EXPORT,
     N_IF,
     N_WHILE,
     N_RETURN,
@@ -31,6 +36,7 @@ typedef enum {
     N_CALL,
     N_INDEX,
     N_GETFIELD,
+    N_OPTGETFIELD,
     N_LISTLIT,
     N_MAPLIT,
     N_FUNCLIT,
@@ -38,6 +44,10 @@ typedef enum {
     N_LIT_INT,
     N_LIT_FLOAT,
     N_LIT_STR,
+    N_STR_INTERP,
+    N_PATTERN_LIST,
+    N_PATTERN_MAP,
+    N_PATTERN_WILDCARD,
     N_LIT_BOOL,
     N_LIT_NIL
 } node_type;
@@ -50,9 +60,9 @@ struct ast {
     union {
         struct { ast** items; size_t count; } block;
 
-        struct { char* name; ast* init; } let_stmt;
+        struct { char* name; ast* init; ast* pattern; int is_const; } let_stmt;
         struct { char* name; ast* value; } assign_stmt;
-        struct { ast* target; ast* index; ast* value; } setindex_stmt;
+        struct { ast* target; ast* index; ast* value; int op; } setindex_stmt;
         struct {
             ast* expr;
             ast** case_exprs;
@@ -60,10 +70,32 @@ struct ast {
             size_t case_count;
             ast* default_block; // optional
         } switch_stmt;
+        struct {
+            ast* expr;
+            ast** case_patterns;
+            ast** case_guards;
+            ast** case_values;
+            size_t case_count;
+            ast* default_expr; // optional
+        } match_expr;
+        struct { ast* stmt; } defer_stmt;
+        struct {
+            ast* path;
+            char* default_name; // optional
+            char** import_names; // names in module
+            char** local_names;  // local bindings
+            size_t count;
+        } import_stmt;
+        struct {
+            char** local_names;
+            char** export_names;
+            size_t count;
+        } export_list;
         struct { char* name; ast* iterable; ast* body; } forin_stmt;
         struct { ast* init; ast* cond; ast* incr; ast* body; } for_c_style_stmt;
         struct { ast* value; } throw_stmt;
         struct { ast* try_b; char* catch_name; ast* catch_b; ast* finally_b; } try_stmt;
+        struct { char* name; ast* value; } export_stmt;
 
         struct { ast* cond; ast* then_b; ast* else_b; } if_stmt;
         struct { ast* cond; ast* body; } while_stmt;
@@ -89,12 +121,15 @@ struct ast {
         struct { char** params; size_t param_count; ast* body; } funclit;
         struct { ast** items; size_t count; } listlit;
         struct { ast** keys; ast** vals; size_t count; } maplit;
+        struct { char** names; size_t count; } list_pattern;
+        struct { char** keys; char** names; size_t count; } map_pattern;
 
         struct { char* name; } ident;
 
         struct { long long v; } lit_int;
         struct { double v; } lit_float;
         struct { char* s; } lit_str;
+        struct { ast** parts; size_t count; } str_interp;
         struct { int v; } lit_bool;
     } as;
 };
