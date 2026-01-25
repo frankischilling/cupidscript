@@ -509,7 +509,6 @@ static ast* parse_stmt(parser* P) {
                         P->tok = saveT;
                         
                         ast* lv = parse_lvalue(P);
-                        token_type op = P->tok.type;
                         next(P);
                         ast* rhs = parse_expr(P);
                         
@@ -559,7 +558,6 @@ static ast* parse_stmt(parser* P) {
                         P->tok = saveT;
                         
                         ast* lv = parse_lvalue(P);
-                        token_type op = P->tok.type;
                         next(P);
                         ast* rhs = parse_expr(P);
                         
@@ -751,4 +749,140 @@ ast* parse_program(parser* P) {
     b->as.block.items = items;
     b->as.block.count = cnt;
     return b;
+}
+
+void ast_free(ast* node) {
+    if (!node) return;
+    
+    switch (node->type) {
+        case N_BLOCK:
+            for (size_t i = 0; i < node->as.block.count; i++) {
+                ast_free(node->as.block.items[i]);
+            }
+            free(node->as.block.items);
+            break;
+        case N_LET:
+            free(node->as.let_stmt.name);
+            ast_free(node->as.let_stmt.init);
+            break;
+        case N_ASSIGN:
+            free(node->as.assign_stmt.name);
+            ast_free(node->as.assign_stmt.value);
+            break;
+        case N_SETINDEX:
+            ast_free(node->as.setindex_stmt.target);
+            ast_free(node->as.setindex_stmt.index);
+            ast_free(node->as.setindex_stmt.value);
+            break;
+        case N_FORIN:
+            free(node->as.forin_stmt.name);
+            ast_free(node->as.forin_stmt.iterable);
+            ast_free(node->as.forin_stmt.body);
+            break;
+        case N_FOR_C_STYLE:
+            ast_free(node->as.for_c_style_stmt.init);
+            ast_free(node->as.for_c_style_stmt.cond);
+            ast_free(node->as.for_c_style_stmt.incr);
+            ast_free(node->as.for_c_style_stmt.body);
+            break;
+        case N_THROW:
+            ast_free(node->as.throw_stmt.value);
+            break;
+        case N_TRY:
+            ast_free(node->as.try_stmt.try_b);
+            free(node->as.try_stmt.catch_name);
+            ast_free(node->as.try_stmt.catch_b);
+            break;
+        case N_IF:
+            ast_free(node->as.if_stmt.cond);
+            ast_free(node->as.if_stmt.then_b);
+            ast_free(node->as.if_stmt.else_b);
+            break;
+        case N_WHILE:
+            ast_free(node->as.while_stmt.cond);
+            ast_free(node->as.while_stmt.body);
+            break;
+        case N_RETURN:
+            ast_free(node->as.ret_stmt.value);
+            break;
+        case N_EXPR_STMT:
+            ast_free(node->as.expr_stmt.expr);
+            break;
+        case N_FNDEF:
+            free(node->as.fndef.name);
+            for (size_t i = 0; i < node->as.fndef.param_count; i++) {
+                free(node->as.fndef.params[i]);
+            }
+            free(node->as.fndef.params);
+            ast_free(node->as.fndef.body);
+            break;
+        case N_BINOP:
+            ast_free(node->as.binop.left);
+            ast_free(node->as.binop.right);
+            break;
+        case N_UNOP:
+            ast_free(node->as.unop.expr);
+            break;
+        case N_RANGE:
+            ast_free(node->as.range.left);
+            ast_free(node->as.range.right);
+            break;
+        case N_TERNARY:
+            ast_free(node->as.ternary.cond);
+            ast_free(node->as.ternary.then_e);
+            ast_free(node->as.ternary.else_e);
+            break;
+        case N_CALL:
+            ast_free(node->as.call.callee);
+            for (size_t i = 0; i < node->as.call.argc; i++) {
+                ast_free(node->as.call.args[i]);
+            }
+            free(node->as.call.args);
+            break;
+        case N_INDEX:
+            ast_free(node->as.index.target);
+            ast_free(node->as.index.index);
+            break;
+        case N_GETFIELD:
+            ast_free(node->as.getfield.target);
+            free(node->as.getfield.field);
+            break;
+        case N_FUNCLIT:
+            for (size_t i = 0; i < node->as.funclit.param_count; i++) {
+                free(node->as.funclit.params[i]);
+            }
+            free(node->as.funclit.params);
+            ast_free(node->as.funclit.body);
+            break;
+        case N_LISTLIT:
+            for (size_t i = 0; i < node->as.listlit.count; i++) {
+                ast_free(node->as.listlit.items[i]);
+            }
+            free(node->as.listlit.items);
+            break;
+        case N_MAPLIT:
+            for (size_t i = 0; i < node->as.maplit.count; i++) {
+                ast_free(node->as.maplit.keys[i]);
+                ast_free(node->as.maplit.vals[i]);
+            }
+            free(node->as.maplit.keys);
+            free(node->as.maplit.vals);
+            break;
+        case N_IDENT:
+            free(node->as.ident.name);
+            break;
+        case N_LIT_STR:
+            free(node->as.lit_str.s);
+            break;
+        case N_LIT_INT:
+        case N_LIT_FLOAT:
+        case N_LIT_BOOL:
+        case N_LIT_NIL:
+        case N_BREAK:
+        case N_CONTINUE:
+            // No dynamic allocations
+            break;
+    }
+    
+    free(node);
 }

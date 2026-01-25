@@ -75,6 +75,11 @@ struct cs_vm {
     cs_track_node* tracked;
     size_t tracked_count;
 
+    // Retained ASTs (keep parsed programs alive for closures/functions)
+    ast** asts;
+    size_t ast_count;
+    size_t ast_cap;
+
     // GC auto-collect policy
     size_t gc_threshold;            // collect when tracked_count >= threshold; 0 = disabled
     size_t gc_allocations;          // total allocations since last GC

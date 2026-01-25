@@ -9,13 +9,13 @@
 * [Types & Values](Types-and-Values)
 * [Control Flow](Control-Flow)
 * [Functions & Closures](Functions-and-Closures)
-* [Collections](Collections)
+* [Collections (list/map)](Collections)
 * [Strings & strbuf](Strings-and-Strbuf)
 * [Standard Library](Standard-Library)
-* [Modules & Paths](Modules-and-Paths)
-* [Errors & Debugging](Errors-and-Debugging)
+* [Modules (load/require) & Paths](Modules-and-Paths)
+* [Errors & Stack Traces](Errors-and-Debugging)
 * [Host Safety Controls](Host-Safety-Controls)
 
 ### Advanced
 
-* [Implementation Notes](Implementation-Notes)
+* [Implementation Notes (Lexer/Parser/VM)](Implementation-Notes)

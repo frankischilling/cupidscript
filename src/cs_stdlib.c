@@ -10,6 +10,10 @@
 #include <sys/time.h>
 #endif
 
+// Forward declarations
+static int nf_error(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out);
+static int nf_format_error(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out);
+
 static char* cs_strdup2_local(const char* s) {
     size_t n = strlen(s ? s : "");
     char* p = (char*)malloc(n + 1);
@@ -140,11 +144,29 @@ static int nf_assert(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_val
     if (out) *out = cs_nil();
     if (argc < 1) return 0;
     if (!truthy_local(argv[0])) {
-        if (argc >= 2 && argv[1].type == CS_T_STR) {
-            cs_error(vm, cs_to_cstr(argv[1]));
-        } else {
-            cs_error(vm, "assertion failed");
+        // Create error object for assertion failure
+        const char* msg = (argc >= 2 && argv[1].type == CS_T_STR) ? 
+                         cs_to_cstr(argv[1]) : "assertion failed";
+        
+        cs_value err_args[2];
+        err_args[0] = cs_str(vm, msg);
+        err_args[1] = cs_str(vm, "ASSERTION");
+        
+        cs_value err;
+        nf_error(vm, NULL, 2, err_args, &err);
+        
+        cs_value_release(err_args[0]);
+        cs_value_release(err_args[1]);
+        
+        // Format and throw the error
+        cs_value formatted;
+        nf_format_error(vm, NULL, 1, &err, &formatted);
+        if (formatted.type == CS_T_STR) {
+            cs_error(vm, cs_to_cstr(formatted));
         }
+        cs_value_release(formatted);
+        cs_value_release(err);
+        
         return 1;
     }
     return 0;
@@ -190,7 +212,7 @@ static int nf_require_optional(cs_vm* vm, void* ud, int argc, const cs_value* ar
     char* path = resolve_path_alloc(vm, cs_to_cstr(argv[0]));
     if (!path) {
         if (out) *out = cs_nil();
-        return 0;  // No error, just return nil
+        return 0;  // No error, just return nil for path resolution failure
     }
 
     // Check if file exists
@@ -198,18 +220,18 @@ static int nf_require_optional(cs_vm* vm, void* ud, int argc, const cs_value* ar
     if (!f) {
         free(path);
         if (out) *out = cs_nil();
-        return 0;  // No error, just return nil
+        return 0;  // File not found - return nil without error
     }
     fclose(f);
 
     // File exists, use regular require logic
+    // Parse/runtime errors should propagate as normal
     cs_value exports = cs_nil();
     int rc = cs_vm_require_module(vm, path, &exports);
     free(path);
     if (rc != 0) {
-        // Even on error, return nil instead of failing
-        if (out) *out = cs_nil();
-        return 0;
+        // Parse or runtime error - propagate the error
+        return 1;
     }
     if (out) *out = exports;
     else cs_value_release(exports);
@@ -287,36 +309,12 @@ static int nf_pop(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value*
     return 0;
 }
 
-static int map_find(cs_map_obj* m, const char* key) {
-    if (!m || !key) return -1;
-    for (size_t i = 0; i < m->len; i++) {
-        if (strcmp(m->entries[i].key->data, key) == 0) return (int)i;
-    }
-    return -1;
-}
-
-static int map_ensure(cs_map_obj* m, size_t need) {
-    if (!m) return 0;
-    if (need <= m->cap) return 1;
-    size_t nc = m->cap ? m->cap : 8;
-    while (nc < need) nc *= 2;
-    cs_map_entry* ne = (cs_map_entry*)realloc(m->entries, nc * sizeof(cs_map_entry));
-    if (!ne) return 0;
-    for (size_t i = m->cap; i < nc; i++) { ne[i].key = NULL; ne[i].val = cs_nil(); }
-    m->entries = ne;
-    m->cap = nc;
-    return 1;
-}
-
 static int nf_mget(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
     (void)vm; (void)ud;
     if (!out) return 0;
     if (argc != 2 || argv[0].type != CS_T_MAP || argv[1].type != CS_T_STR) { *out = cs_nil(); return 0; }
-    cs_map_obj* m = (cs_map_obj*)argv[0].as.p;
     const char* key = ((cs_string*)argv[1].as.p)->data;
-    int idx = map_find(m, key);
-    if (idx < 0) { *out = cs_nil(); return 0; }
-    *out = cs_value_copy(m->entries[(size_t)idx].val);
+    *out = cs_map_get(argv[0], key);
     return 0;
 }
 
@@ -324,19 +322,8 @@ static int nf_mset(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value
     (void)ud;
     if (out) *out = cs_nil();
     if (argc != 3 || argv[0].type != CS_T_MAP || argv[1].type != CS_T_STR) return 0;
-    cs_map_obj* m = (cs_map_obj*)argv[0].as.p;
-    cs_string* key = (cs_string*)argv[1].as.p;
-    int idx = map_find(m, key->data);
-    if (idx >= 0) {
-        cs_value_release(m->entries[(size_t)idx].val);
-        m->entries[(size_t)idx].val = cs_value_copy(argv[2]);
-        return 0;
-    }
-    if (!map_ensure(m, m->len + 1)) { cs_error(vm, "out of memory"); return 1; }
-    cs_str_incref(key);
-    m->entries[m->len].key = key;
-    m->entries[m->len].val = cs_value_copy(argv[2]);
-    m->len++;
+    const char* key = ((cs_string*)argv[1].as.p)->data;
+    if (cs_map_set(argv[0], key, argv[2]) != 0) { cs_error(vm, "out of memory"); return 1; }
     return 0;
 }
 
@@ -344,9 +331,8 @@ static int nf_mhas(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value
     (void)vm; (void)ud;
     if (!out) return 0;
     if (argc != 2 || argv[0].type != CS_T_MAP || argv[1].type != CS_T_STR) { *out = cs_bool(0); return 0; }
-    cs_map_obj* m = (cs_map_obj*)argv[0].as.p;
     const char* key = ((cs_string*)argv[1].as.p)->data;
-    *out = cs_bool(map_find(m, key) >= 0);
+    *out = cs_bool(cs_map_has(argv[0], key) != 0);
     return 0;
 }
 
@@ -354,16 +340,8 @@ static int nf_mdel(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value
     (void)vm; (void)ud;
     if (!out) return 0;
     if (argc != 2 || argv[0].type != CS_T_MAP || argv[1].type != CS_T_STR) { *out = cs_bool(0); return 0; }
-    cs_map_obj* m = (cs_map_obj*)argv[0].as.p;
     const char* key = ((cs_string*)argv[1].as.p)->data;
-    int idx = map_find(m, key);
-    if (idx < 0) { *out = cs_bool(0); return 0; }
-    size_t u = (size_t)idx;
-    cs_str_decref(m->entries[u].key);
-    cs_value_release(m->entries[u].val);
-    for (size_t i = u + 1; i < m->len; i++) m->entries[i - 1] = m->entries[i];
-    m->len--;
-    *out = cs_bool(1);
+    *out = cs_bool(cs_map_del(argv[0], key) == 0);
     return 0;
 }
 
@@ -371,16 +349,8 @@ static int nf_keys(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value
     (void)ud;
     if (!out) return 0;
     if (argc != 1 || argv[0].type != CS_T_MAP) { *out = cs_list(vm); return 0; }
-    cs_map_obj* m = (cs_map_obj*)argv[0].as.p;
-    cs_value listv = cs_list(vm);
-    if (!listv.as.p) { cs_error(vm, "out of memory"); return 1; }
-    cs_list_obj* l = (cs_list_obj*)listv.as.p;
-    if (!list_ensure(l, m->len)) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
-    for (size_t i = 0; i < m->len; i++) {
-        cs_value sv; sv.type = CS_T_STR; sv.as.p = m->entries[i].key;
-        cs_str_incref(m->entries[i].key);
-        l->items[l->len++] = sv;
-    }
+    cs_value listv = cs_map_keys(vm, argv[0]);
+    if (listv.type == CS_T_NIL) { cs_error(vm, "out of memory"); return 1; }
     *out = listv;
     return 0;
 }
@@ -656,7 +626,10 @@ static int nf_values(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_val
     if (!listv.as.p) { cs_error(vm, "out of memory"); return 1; }
     cs_list_obj* l = (cs_list_obj*)listv.as.p;
     if (!list_ensure(l, m->len)) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
-    for (size_t i = 0; i < m->len; i++) l->items[l->len++] = cs_value_copy(m->entries[i].val);
+    for (size_t i = 0; i < m->cap; i++) {
+        if (!m->entries[i].key) continue;
+        l->items[l->len++] = cs_value_copy(m->entries[i].val);
+    }
     *out = listv;
     return 0;
 }
@@ -671,7 +644,8 @@ static int nf_items(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_valu
     cs_list_obj* ol = (cs_list_obj*)outer.as.p;
     if (!list_ensure(ol, m->len)) { cs_value_release(outer); cs_error(vm, "out of memory"); return 1; }
 
-    for (size_t i = 0; i < m->len; i++) {
+    for (size_t i = 0; i < m->cap; i++) {
+        if (!m->entries[i].key) continue;
         cs_value pair = cs_list(vm);
         if (!pair.as.p) { cs_value_release(outer); cs_error(vm, "out of memory"); return 1; }
         cs_list_obj* pl = (cs_list_obj*)pair.as.p;
@@ -1214,12 +1188,15 @@ static int cs_value_equals(const cs_value* a, const cs_value* b) {
             cs_map_obj* ma = (cs_map_obj*)a->as.p;
             cs_map_obj* mb = (cs_map_obj*)b->as.p;
             if (ma->len != mb->len) return 0;
-            for (size_t i = 0; i < ma->len; i++) {
-                int idx = map_find(mb, ma->entries[i].key->data);
-                if (idx < 0) return 0;
-                if (!cs_value_equals(&ma->entries[i].val, &mb->entries[(size_t)idx].val)) {
-                    return 0;
-                }
+            cs_value mbv = *b;
+            for (size_t i = 0; i < ma->cap; i++) {
+                if (!ma->entries[i].key) continue;
+                const char* k = ma->entries[i].key->data;
+                if (cs_map_has(mbv, k) == 0) return 0;
+                cs_value bv = cs_map_get(mbv, k);
+                int ok = cs_value_equals(&ma->entries[i].val, &bv);
+                cs_value_release(bv);
+                if (!ok) return 0;
             }
             return 1;
         }
@@ -1406,7 +1383,8 @@ static int nf_map_values(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs
     cs_list_obj* l = (cs_list_obj*)values_list.as.p;
     
     if (!list_ensure(l, m->len)) { cs_value_release(values_list); cs_error(vm, "out of memory"); return 1; }
-    for (size_t i = 0; i < m->len; i++) {
+    for (size_t i = 0; i < m->cap; i++) {
+        if (!m->entries[i].key) continue;
         l->items[l->len++] = cs_value_copy(m->entries[i].val);
     }
     
@@ -1446,19 +1424,13 @@ static int nf_copy(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value
             cs_value new_map = cs_map(vm);
             if (!new_map.as.p) { cs_error(vm, "out of memory"); return 1; }
             cs_map_obj* src_map = (cs_map_obj*)src.as.p;
-            cs_map_obj* dst_map = (cs_map_obj*)new_map.as.p;
-            
-            if (!map_ensure(dst_map, src_map->len)) {
-                cs_value_release(new_map);
-                cs_error(vm, "out of memory");
-                return 1;
-            }
-            
-            for (size_t i = 0; i < src_map->len; i++) {
-                cs_str_incref(src_map->entries[i].key);
-                dst_map->entries[dst_map->len].key = src_map->entries[i].key;
-                dst_map->entries[dst_map->len].val = cs_value_copy(src_map->entries[i].val);
-                dst_map->len++;
+            for (size_t i = 0; i < src_map->cap; i++) {
+                if (!src_map->entries[i].key) continue;
+                if (cs_map_set(new_map, src_map->entries[i].key->data, src_map->entries[i].val) != 0) {
+                    cs_value_release(new_map);
+                    cs_error(vm, "out of memory");
+                    return 1;
+                }
             }
             
             *out = new_map;
@@ -1471,65 +1443,55 @@ static int nf_copy(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value
     }
 }
 
-static cs_value deepcopy_impl(cs_vm* vm, cs_value src, cs_map_obj* visited_map);
+static cs_value deepcopy_impl(cs_vm* vm, cs_value src, cs_value visited_map);
 
-static cs_value deepcopy_impl(cs_vm* vm, cs_value src, cs_map_obj* visited_map) {
+static cs_value deepcopy_impl(cs_vm* vm, cs_value src, cs_value visited_map) {
     // Check for cycles
     if (src.type == CS_T_LIST || src.type == CS_T_MAP) {
         char ptr_str[32];
         snprintf(ptr_str, sizeof(ptr_str), "%p", src.as.p);
-        
-        int idx = map_find(visited_map, ptr_str);
-        if (idx >= 0) {
-            return cs_value_copy(visited_map->entries[(size_t)idx].val);
-        }
+
+        cs_value hit = cs_map_get(visited_map, ptr_str);
+        if (hit.type != CS_T_NIL) return hit;
+        cs_value_release(hit);
     }
     
     switch (src.type) {
-        case CS_T_LIST: {
-            cs_value new_list = cs_list(vm);
-            cs_list_obj* src_list = (cs_list_obj*)src.as.p;
-            cs_list_obj* dst_list = (cs_list_obj*)new_list.as.p;
+	        case CS_T_LIST: {
+	            cs_value new_list = cs_list(vm);
+	            cs_list_obj* src_list = (cs_list_obj*)src.as.p;
+	            cs_list_obj* dst_list = (cs_list_obj*)new_list.as.p;
             
             // Register in visited map
             char ptr_str[32];
             snprintf(ptr_str, sizeof(ptr_str), "%p", src.as.p);
-            cs_string* key = cs_str_new(ptr_str);
-            if (!map_ensure(visited_map, visited_map->len + 1)) return cs_nil();
-            visited_map->entries[visited_map->len].key = key;
-            visited_map->entries[visited_map->len].val = cs_value_copy(new_list);
-            visited_map->len++;
+            if (cs_map_set(visited_map, ptr_str, new_list) != 0) { cs_value_release(new_list); return cs_nil(); }
             
-            if (!list_ensure(dst_list, src_list->len)) return cs_nil();
-            for (size_t i = 0; i < src_list->len; i++) {
-                cs_value item = deepcopy_impl(vm, src_list->items[i], visited_map);
-                dst_list->items[dst_list->len++] = item;
-            }
-            
-            return new_list;
-        }
+	            if (!list_ensure(dst_list, src_list->len)) { cs_value_release(new_list); return cs_nil(); }
+	            for (size_t i = 0; i < src_list->len; i++) {
+	                cs_value item = deepcopy_impl(vm, src_list->items[i], visited_map);
+	                if (item.type == CS_T_NIL && src_list->items[i].type != CS_T_NIL) { cs_value_release(new_list); return cs_nil(); }
+	                dst_list->items[dst_list->len++] = item;
+	            }
+	            
+	            return new_list;
+	        }
         
         case CS_T_MAP: {
             cs_value new_map = cs_map(vm);
             cs_map_obj* src_map = (cs_map_obj*)src.as.p;
-            cs_map_obj* dst_map = (cs_map_obj*)new_map.as.p;
             
             // Register in visited map
             char ptr_str[32];
             snprintf(ptr_str, sizeof(ptr_str), "%p", src.as.p);
-            cs_string* key = cs_str_new(ptr_str);
-            if (!map_ensure(visited_map, visited_map->len + 1)) return cs_nil();
-            visited_map->entries[visited_map->len].key = key;
-            visited_map->entries[visited_map->len].val = cs_value_copy(new_map);
-            visited_map->len++;
+            if (cs_map_set(visited_map, ptr_str, new_map) != 0) { cs_value_release(new_map); return cs_nil(); }
             
-            if (!map_ensure(dst_map, src_map->len)) return cs_nil();
-            for (size_t i = 0; i < src_map->len; i++) {
+            for (size_t i = 0; i < src_map->cap; i++) {
+                if (!src_map->entries[i].key) continue;
                 cs_value val = deepcopy_impl(vm, src_map->entries[i].val, visited_map);
-                cs_str_incref(src_map->entries[i].key);
-                dst_map->entries[dst_map->len].key = src_map->entries[i].key;
-                dst_map->entries[dst_map->len].val = val;
-                dst_map->len++;
+                if (val.type == CS_T_NIL && src_map->entries[i].val.type != CS_T_NIL) { cs_value_release(new_map); return cs_nil(); }
+                if (cs_map_set(new_map, src_map->entries[i].key->data, val) != 0) { cs_value_release(val); cs_value_release(new_map); return cs_nil(); }
+                cs_value_release(val);
             }
             
             return new_map;
@@ -1547,7 +1509,7 @@ static int nf_deepcopy(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_v
     
     cs_value visited = cs_map(vm);
     if (!visited.as.p) { cs_error(vm, "out of memory"); return 1; }
-    *out = deepcopy_impl(vm, argv[0], (cs_map_obj*)visited.as.p);
+    *out = deepcopy_impl(vm, argv[0], visited);
     cs_value_release(visited);
     
     return 0;
@@ -1621,8 +1583,7 @@ static int nf_contains(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_v
                 cs_error(vm, "Map keys must be strings");
                 return 1;
             }
-            cs_map_obj* m = (cs_map_obj*)container.as.p;
-            *out = cs_bool(map_find(m, cs_to_cstr(item)) >= 0);
+            *out = cs_bool(cs_map_has(container, cs_to_cstr(item)) != 0);
             return 0;
         }
         
@@ -1724,6 +1685,31 @@ static int nf_is_error(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_v
     return 0;
 }
 
+static int nf_format_error(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1 || argv[0].type != CS_T_MAP) {
+        *out = cs_str(vm, "Error");
+        return 0;
+    }
+    
+    // Format: "[code] message"
+    cs_value msg_val = cs_map_get(argv[0], "msg");
+    cs_value code_val = cs_map_get(argv[0], "code");
+    
+    const char* msg = (msg_val.type == CS_T_STR) ? cs_to_cstr(msg_val) : "Unknown error";
+    const char* code = (code_val.type == CS_T_STR) ? cs_to_cstr(code_val) : "ERROR";
+    
+    char buf[512];
+    snprintf(buf, sizeof(buf), "[%s] %s", code, msg);
+    
+    cs_value_release(msg_val);
+    cs_value_release(code_val);
+    
+    *out = cs_str(vm, buf);
+    return 0;
+}
+
 void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "print",  nf_print,  NULL);
     cs_register_native(vm, "typeof", nf_typeof, NULL);
@@ -1807,6 +1793,7 @@ void cs_register_stdlib(cs_vm* vm) {
     // Error objects
     cs_register_native(vm, "error",    nf_error,    NULL);
     cs_register_native(vm, "is_error", nf_is_error, NULL);
+    cs_register_native(vm, "format_error", nf_format_error, NULL);
     
     // GC functions
     cs_register_native(vm, "gc_stats",  nf_gc_stats,  NULL);
@@ -1818,4 +1805,20 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "get_timeout",            nf_get_timeout,            NULL);
     cs_register_native(vm, "get_instruction_limit",  nf_get_instruction_limit,  NULL);
     cs_register_native(vm, "get_instruction_count",  nf_get_instruction_count,  NULL);
+    
+    // Error code constants (ERR.*)
+    cs_value err_map = cs_map(vm);
+    if (err_map.as.p) {
+        cs_map_set(err_map, "INVALID_ARG", cs_str(vm, "INVALID_ARG"));
+        cs_map_set(err_map, "TYPE_ERROR", cs_str(vm, "TYPE_ERROR"));
+        cs_map_set(err_map, "DIV_ZERO", cs_str(vm, "DIV_ZERO"));
+        cs_map_set(err_map, "OUT_OF_BOUNDS", cs_str(vm, "OUT_OF_BOUNDS"));
+        cs_map_set(err_map, "NOT_FOUND", cs_str(vm, "NOT_FOUND"));
+        cs_map_set(err_map, "ASSERTION", cs_str(vm, "ASSERTION"));
+        cs_map_set(err_map, "GENERIC", cs_str(vm, "ERROR"));
+        
+        // Register as global ERR constant
+        cs_register_global(vm, "ERR", err_map);
+        cs_value_release(err_map);
+    }
 }

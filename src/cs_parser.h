@@ -101,5 +101,6 @@ typedef struct {
 void parser_init(parser* P, const char* src, const char* source_name);
 ast* parse_program(parser* P);
 void parse_free_error(parser* P);
+void ast_free(ast* node);  // Free AST and all its children
 
 #endif

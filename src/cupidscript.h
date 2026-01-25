@@ -64,6 +64,8 @@ int cs_call_value(cs_vm* vm, cs_value callee, int argc, const cs_value* argv, cs
 
 // Register native functions (for CupidFM to expose API)
 void cs_register_native(cs_vm* vm, const char* name, cs_native_fn fn, void* userdata);
+// Register global values (constants, etc.)
+void cs_register_global(cs_vm* vm, const char* name, cs_value value);
 
 // Error text (valid until next VM call that sets it)
 const char* cs_last_error(const cs_vm* vm);

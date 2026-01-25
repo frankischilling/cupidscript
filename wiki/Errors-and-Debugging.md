@@ -70,6 +70,9 @@ For standardized error handling, use the `error()` helper to create error object
 * `error(msg)` - Creates a map with `{msg, stack}` fields
 * `error(msg, code)` - Creates a map with `{msg, code, stack}` fields
 * `is_error(value)` - Checks if value is an error object (has `msg` and `stack` fields)
+* `format_error(err)` - Formats an error object into a readable string
+
+There is also a global `ERR` map containing common string error codes you can use with `error(msg, code)`.
 
 The `stack` field contains a list of stack frame strings captured at the time of error creation.
 

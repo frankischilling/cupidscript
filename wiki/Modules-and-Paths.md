@@ -25,11 +25,17 @@ load("util.cs"); // runs again
 Runs a file only once per resolved path.
 
 ```c
-require("util.cs");
-require("util.cs"); // no-op, returns true
+let util = require("util.cs");
+let util2 = require("util.cs"); // cached, returns same exports
 ```
 
-Internally, it stores resolved paths in a require-list and checks future calls.
+`require()` returns the module's `exports` map.
+
+Inside a required file, the VM provides:
+
+* `exports` (map) - values to export
+* `__file__` (string) - resolved module path
+* `__dir__` (string) - directory containing the module
 
 ## `require_optional(path)`
 
@@ -52,7 +58,7 @@ Useful for:
 
 Returns:
 
-* `true` if file was loaded successfully
+* module exports if file exists
 * `nil` if file doesn't exist
 
 ## Path Helpers

@@ -79,6 +79,39 @@ static const char* vm_intern_source(cs_vm* vm, const char* name) {
     return dup;
 }
 
+// Normalize path to canonical form (resolves ./ and ../, converts to forward slashes)
+static char* path_normalize_alloc(const char* path) {
+    if (!path) return NULL;
+    
+    size_t len = strlen(path);
+    char* normalized = (char*)malloc(len + 1);
+    if (!normalized) return NULL;
+    
+    // Convert backslashes to forward slashes
+    for (size_t i = 0; i < len; i++) {
+        normalized[i] = (path[i] == '\\') ? '/' : path[i];
+    }
+    normalized[len] = '\0';
+    
+    // Simple normalization: remove redundant slashes
+    size_t write = 0;
+    int last_was_slash = 0;
+    for (size_t read = 0; read < len; read++) {
+        if (normalized[read] == '/') {
+            if (!last_was_slash) {
+                normalized[write++] = '/';
+                last_was_slash = 1;
+            }
+        } else {
+            normalized[write++] = normalized[read];
+            last_was_slash = 0;
+        }
+    }
+    normalized[write] = '\0';
+    
+    return normalized;
+}
+
 static char* path_dirname_alloc(const char* path) {
     if (!path || !*path) return cs_strdup2(".");
     const char* last_slash = strrchr(path, '/');
@@ -113,6 +146,7 @@ static void vm_dir_pop(cs_vm* vm) {
 }
 
 static void vm_maybe_auto_gc(cs_vm* vm);  // Forward declaration
+static int list_push(cs_list_obj* l, cs_value v);  // Forward declaration
 
 static int env_find(cs_env* e, const char* key);
 
@@ -220,7 +254,7 @@ cs_value cs_capture_stack_trace(cs_vm* vm) {
         
         cs_value entry = cs_str(vm, buf);
         if (entry.as.p) {
-            list->items[list->len++] = entry;
+            list_push(list, entry);  // Use list_push() to ensure capacity
         }
     }
     
@@ -345,7 +379,8 @@ static void map_incref(cs_map_obj* m) { if (m) m->ref++; }
 static void map_decref(cs_map_obj* m) {
     if (!m) return;
     if (--m->ref > 0) return;
-    for (size_t i = 0; i < m->len; i++) {
+    for (size_t i = 0; i < m->cap; i++) {
+        if (!m->entries[i].key) continue;
         cs_str_decref(m->entries[i].key);
         cs_value_release(m->entries[i].val);
     }
@@ -537,10 +572,52 @@ static int list_push(cs_list_obj* l, cs_value v) {
     return 1;
 }
 
+// Simple hash function for string keys (djb2)
+static uint32_t hash_key(const char* str) {
+    uint32_t hash = 5381;
+    int c;
+    while ((c = *str++)) hash = ((hash << 5) + hash) + (uint32_t)c;
+    return hash;
+}
+
+static int map_rehash(cs_map_obj* m, size_t new_cap) {
+    if (!m) return 0;
+    if (new_cap < 8) new_cap = 8;
+
+    cs_map_entry* ne = (cs_map_entry*)calloc(new_cap, sizeof(cs_map_entry));
+    if (!ne) return 0;
+
+    cs_map_entry* old_entries = m->entries;
+    size_t old_cap = m->cap;
+
+    m->entries = ne;
+    m->cap = new_cap;
+
+    if (old_entries) {
+        for (size_t i = 0; i < old_cap; i++) {
+            if (!old_entries[i].key) continue;
+            uint32_t h = hash_key(old_entries[i].key->data);
+            size_t idx = h % new_cap;
+            while (ne[idx].key != NULL) idx = (idx + 1) % new_cap;
+            ne[idx] = old_entries[i];
+        }
+        free(old_entries);
+    }
+
+    return 1;
+}
+
 static int map_find(cs_map_obj* m, const char* key) {
-    if (!m || !key) return -1;
-    for (size_t i = 0; i < m->len; i++) {
-        if (strcmp(m->entries[i].key->data, key) == 0) return (int)i;
+    if (!m || !key || m->len == 0) return -1;
+
+    uint32_t h = hash_key(key);
+    size_t idx = h % m->cap;
+    size_t probe = 0;
+    while (probe < m->cap) {
+        if (m->entries[idx].key == NULL) return -1;
+        if (strcmp(m->entries[idx].key->data, key) == 0) return (int)idx;
+        idx = (idx + 1) % m->cap;
+        probe++;
     }
     return -1;
 }
@@ -548,17 +625,10 @@ static int map_find(cs_map_obj* m, const char* key) {
 static int map_ensure(cs_map_obj* m, size_t need) {
     if (!m) return 0;
     if (need <= m->cap) return 1;
+
     size_t nc = m->cap ? m->cap : 8;
     while (nc < need) nc *= 2;
-    cs_map_entry* ne = (cs_map_entry*)realloc(m->entries, nc * sizeof(cs_map_entry));
-    if (!ne) return 0;
-    for (size_t i = m->cap; i < nc; i++) {
-        ne[i].key = NULL;
-        ne[i].val = cs_nil();
-    }
-    m->entries = ne;
-    m->cap = nc;
-    return 1;
+    return map_rehash(m, nc);
 }
 
 static cs_value map_get(cs_map_obj* m, const char* key) {
@@ -569,18 +639,34 @@ static cs_value map_get(cs_map_obj* m, const char* key) {
 
 static int map_set(cs_map_obj* m, cs_string* key, cs_value v) {
     if (!m || !key) return 0;
-    int idx = map_find(m, key->data);
-    if (idx >= 0) {
-        cs_value_release(m->entries[(size_t)idx].val);
-        m->entries[(size_t)idx].val = cs_value_copy(v);
-        return 1;
+
+    // Maintain load factor < 0.7
+    if ((m->len + 1) > (m->cap * 7 / 10)) {
+        size_t new_cap = m->cap ? m->cap * 2 : 8;
+        if (!map_ensure(m, new_cap)) return 0;
     }
-    if (!map_ensure(m, m->len + 1)) return 0;
-    cs_str_incref(key);
-    m->entries[m->len].key = key;
-    m->entries[m->len].val = cs_value_copy(v);
-    m->len++;
-    return 1;
+
+    uint32_t h = hash_key(key->data);
+    size_t idx = h % m->cap;
+    size_t probe = 0;
+    while (probe < m->cap) {
+        if (m->entries[idx].key == NULL) {
+            cs_str_incref(key);
+            m->entries[idx].key = key;
+            m->entries[idx].val = cs_value_copy(v);
+            m->len++;
+            return 1;
+        }
+        if (strcmp(m->entries[idx].key->data, key->data) == 0) {
+            cs_value_release(m->entries[idx].val);
+            m->entries[idx].val = cs_value_copy(v);
+            return 1;
+        }
+        idx = (idx + 1) % m->cap;
+        probe++;
+    }
+
+    return 0;
 }
 
 // ---------- string helpers ----------
@@ -1726,7 +1812,8 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                 }
             } else if (it.type == CS_T_MAP) {
                 cs_map_obj* m = as_map(it);
-                for (size_t i = 0; i < (m ? m->len : 0); i++) {
+                for (size_t i = 0; m && i < m->cap; i++) {
+                    if (!m->entries[i].key) continue;
                     cs_value keyv;
                     keyv.type = CS_T_STR;
                     keyv.as.p = m->entries[i].key;
@@ -1918,6 +2005,9 @@ cs_vm* cs_vm_new(void) {
     if (!vm) return NULL;
     vm->tracked = NULL;
     vm->tracked_count = 0;
+    vm->asts = NULL;
+    vm->ast_count = 0;
+    vm->ast_cap = 0;
     vm->globals = env_new(NULL);
     vm->last_error = NULL;
     vm->pending_throw = 0;
@@ -1958,6 +2048,10 @@ void cs_vm_free(cs_vm* vm) {
     free(vm->last_error);
     cs_value_release(vm->pending_thrown);
     free(vm->frames);
+    for (size_t i = 0; i < vm->ast_count; i++) {
+        ast_free(vm->asts[i]);
+    }
+    free(vm->asts);
     for (size_t i = 0; i < vm->source_count; i++) free(vm->sources[i]);
     free(vm->sources);
     for (size_t i = 0; i < vm->dir_count; i++) free(vm->dir_stack[i]);
@@ -1987,6 +2081,11 @@ void cs_register_native(cs_vm* vm, const char* name, cs_native_fn fn, void* user
     cs_value_release(v);
 }
 
+void cs_register_global(cs_vm* vm, const char* name, cs_value value) {
+    if (!vm || !name) return;
+    env_set_here(vm->globals, name, value);
+}
+
 static int run_ast_in_env(cs_vm* vm, ast* prog, cs_env* env) {
     size_t base_depth = vm ? vm->frame_count : 0;
     
@@ -2014,6 +2113,22 @@ static int run_ast_in_env(cs_vm* vm, ast* prog, cs_env* env) {
     return r.ok ? 0 : -1;
 }
 
+static void vm_keep_ast(cs_vm* vm, ast* prog) {
+    if (!vm || !prog) return;
+    if (vm->ast_count == vm->ast_cap) {
+        size_t nc = vm->ast_cap ? vm->ast_cap * 2 : 16;
+        ast** na = (ast**)realloc(vm->asts, nc * sizeof(ast*));
+        if (!na) {
+            // Best-effort: if we can't track it, keep it leaked/alive.
+            // Function closures may reference it.
+            return;
+        }
+        vm->asts = na;
+        vm->ast_cap = nc;
+    }
+    vm->asts[vm->ast_count++] = prog;
+}
+
 int cs_vm_run_string(cs_vm* vm, const char* code, const char* virtual_name) {
     if (!vm || !code) return -1;
 
@@ -2031,10 +2146,13 @@ int cs_vm_run_string(cs_vm* vm, const char* code, const char* virtual_name) {
         free(vm->last_error);
         vm->last_error = cs_strdup2(P.error);
         parse_free_error(&P);
+        ast_free(prog);  // Free AST on parse error
         return -1;
     }
     int rc = run_ast_in_env(vm, prog, vm->globals);
-    // NOTE: v0 does not free AST; treat VM as owning program lifetime (fine for plugins)
+
+    // Keep AST alive for closures/functions (freed in cs_vm_free).
+    vm_keep_ast(vm, prog);
     
     // Trigger auto-GC after script execution
     vm_maybe_auto_gc(vm);
@@ -2150,7 +2268,8 @@ size_t cs_vm_collect_cycles(cs_vm* vm) {
             }
         } else if (items[i].type == CS_TRACK_MAP) {
             cs_map_obj* m = (cs_map_obj*)items[i].ptr;
-            for (size_t j = 0; m && j < m->len; j++) {
+            for (size_t j = 0; m && j < m->cap; j++) {
+                if (!m->entries[j].key) continue;
                 cs_value v = m->entries[j].val;
                 if (v.type == CS_T_LIST) {
                     size_t k = gc_find_index(keys, types, vals, cap, CS_TRACK_LIST, v.as.p);
@@ -2190,7 +2309,8 @@ size_t cs_vm_collect_cycles(cs_vm* vm) {
             }
         } else if (items[i].type == CS_TRACK_MAP) {
             cs_map_obj* m = (cs_map_obj*)items[i].ptr;
-            for (size_t j = 0; m && j < m->len; j++) {
+            for (size_t j = 0; m && j < m->cap; j++) {
+                if (!m->entries[j].key) continue;
                 cs_value v = m->entries[j].val;
                 if (v.type == CS_T_LIST) {
                     size_t k = gc_find_index(keys, types, vals, cap, CS_TRACK_LIST, v.as.p);
@@ -2227,7 +2347,8 @@ size_t cs_vm_collect_cycles(cs_vm* vm) {
             free(l);
         } else if (items[i].type == CS_TRACK_MAP) {
             cs_map_obj* m = (cs_map_obj*)items[i].ptr;
-            for (size_t j = 0; m && j < m->len; j++) {
+            for (size_t j = 0; m && j < m->cap; j++) {
+                if (!m->entries[j].key) continue;
                 cs_str_decref(m->entries[j].key);
                 cs_value v = m->entries[j].val;
                 int is_garbage = 0;
@@ -2289,19 +2410,28 @@ int cs_vm_require_module(cs_vm* vm, const char* path, cs_value* exports_out) {
     vm->last_error = NULL;
     vm_clear_pending_throw(vm);
 
-    int idx = module_find(vm, path);
+    // Normalize path to avoid duplicate modules from "./a.cs" vs "a.cs"
+    char* norm_path = path_normalize_alloc(path);
+    if (!norm_path) { cs_error(vm, "out of memory"); return -1; }
+
+    int idx = module_find(vm, norm_path);
     if (idx >= 0) {
         if (exports_out) *exports_out = cs_value_copy(vm->modules[(size_t)idx].exports);
+        free(norm_path);
         return 0;
     }
 
-    char* code = read_file_all(path);
-    if (!code) { cs_error(vm, "could not read file"); return -1; }
+    char* code = read_file_all(norm_path);
+    if (!code) { 
+        free(norm_path);
+        cs_error(vm, "could not read file"); 
+        return -1; 
+    }
 
-    char* dir = path_dirname_alloc(path);
+    char* dir = path_dirname_alloc(norm_path);
     vm_dir_push_owned(vm, dir);
 
-    const char* srcname = vm_intern_source(vm, path);
+    const char* srcname = vm_intern_source(vm, norm_path);
     parser P;
     parser_init(&P, code, srcname);
     ast* prog = parse_program(&P);
@@ -2310,13 +2440,17 @@ int cs_vm_require_module(cs_vm* vm, const char* path, cs_value* exports_out) {
     if (P.error) {
         cs_error(vm, P.error);
         parse_free_error(&P);
+        ast_free(prog);  // Free AST on parse error
         vm_dir_pop(vm);
+        free(norm_path);
         return -1;
     }
 
     cs_env* menv = env_new(vm->globals);
     if (!menv) {
+        ast_free(prog);
         vm_dir_pop(vm);
+        free(norm_path);
         cs_error(vm, "out of memory");
         return -1;
     }
@@ -2324,7 +2458,9 @@ int cs_vm_require_module(cs_vm* vm, const char* path, cs_value* exports_out) {
     cs_value exports = cs_map(vm);
     if (!exports.as.p) {
         env_decref(menv);
+        ast_free(prog);
         vm_dir_pop(vm);
+        free(norm_path);
         cs_error(vm, "out of memory");
         return -1;
     }
@@ -2332,11 +2468,27 @@ int cs_vm_require_module(cs_vm* vm, const char* path, cs_value* exports_out) {
     // Make exports available to the module.
     env_set_here(menv, "exports", exports);
     cs_value_release(exports);
+    
+    // Set __file__ and __dir__ for module introspection
+    cs_value file_val = cs_str(vm, norm_path);
+    env_set_here(menv, "__file__", file_val);
+    cs_value_release(file_val);
+    
+    if (dir) {
+        cs_value dir_val = cs_str(vm, dir);
+        env_set_here(menv, "__dir__", dir_val);
+        cs_value_release(dir_val);
+    }
 
     int rc = run_ast_in_env(vm, prog, menv);
+
+    // Keep AST alive for closures/functions (freed in cs_vm_free).
+    vm_keep_ast(vm, prog);
+
     if (rc != 0) {
         env_decref(menv);
         vm_dir_pop(vm);
+        free(norm_path);
         return -1;
     }
 
@@ -2344,10 +2496,11 @@ int cs_vm_require_module(cs_vm* vm, const char* path, cs_value* exports_out) {
     cs_value exv = cs_nil();
     (void)env_get(menv, "exports", &exv);
 
-    if (!module_add(vm, path, exv)) {
+    if (!module_add(vm, norm_path, exv)) {
         cs_value_release(exv);
         env_decref(menv);
         vm_dir_pop(vm);
+        free(norm_path);
         cs_error(vm, "out of memory");
         return -1;
     }
@@ -2356,6 +2509,7 @@ int cs_vm_require_module(cs_vm* vm, const char* path, cs_value* exports_out) {
     cs_value_release(exv);
     env_decref(menv);
     vm_dir_pop(vm);
+    free(norm_path);
     return 0;
 }
 
@@ -2611,7 +2765,7 @@ int cs_list_push(cs_value list_val, cs_value value) {
     if (list_val.type != CS_T_LIST) return -1;
     cs_list_obj* list = as_list(list_val);
     if (!list) return -1;
-    return list_push(list, cs_value_copy(value)) ? 0 : -1;
+    return list_push(list, value) ? 0 : -1;
 }
 
 cs_value cs_list_pop(cs_value list_val) {
@@ -2633,7 +2787,7 @@ cs_value cs_map_get(cs_value map_val, const char* key) {
     if (map_val.type != CS_T_MAP || !key) return cs_nil();
     cs_map_obj* map = as_map(map_val);
     if (!map) return cs_nil();
-    return cs_value_copy(map_get(map, key));
+    return map_get(map, key);
 }
 
 int cs_map_set(cs_value map_val, const char* key, cs_value value) {
@@ -2643,7 +2797,7 @@ int cs_map_set(cs_value map_val, const char* key, cs_value value) {
     
     cs_string* key_str = cs_str_new(key);
     if (!key_str) return -1;
-    int result = map_set(map, key_str, cs_value_copy(value));
+    int result = map_set(map, key_str, value);
     cs_str_decref(key_str);
     return result ? 0 : -1;
 }
@@ -2662,15 +2816,25 @@ int cs_map_del(cs_value map_val, const char* key) {
     
     int idx = map_find(map, key);
     if (idx < 0) return -1;
-    
+
+    cs_map_entry* ne = (cs_map_entry*)calloc(map->cap, sizeof(cs_map_entry));
+    if (!ne) return -1;
+
+    for (size_t i = 0; i < map->cap; i++) {
+        if (!map->entries[i].key) continue;
+        if ((int)i == idx) continue;
+        uint32_t h = hash_key(map->entries[i].key->data);
+        size_t pos = h % map->cap;
+        while (ne[pos].key != NULL) pos = (pos + 1) % map->cap;
+        ne[pos] = map->entries[i];
+    }
+
     cs_str_decref(map->entries[idx].key);
     cs_value_release(map->entries[idx].val);
-    
-    // Shift remaining entries
-    for (size_t i = (size_t)idx; i + 1 < map->len; i++) {
-        map->entries[i] = map->entries[i + 1];
-    }
-    map->len--;
+
+    free(map->entries);
+    map->entries = ne;
+    if (map->len) map->len--;
     return 0;
 }
 
@@ -2683,9 +2847,14 @@ cs_value cs_map_keys(cs_vm* vm, cs_value map_val) {
     cs_list_obj* list = as_list(list_val);
     if (!list) return cs_nil();
     
-    for (size_t i = 0; i < map->len; i++) {
-        cs_value key_val = cs_str(vm, map->entries[i].key->data);
-        list_push(list, key_val);
+    if (!list_ensure(list, map->len)) { cs_value_release(list_val); return cs_nil(); }
+    for (size_t i = 0; i < map->cap; i++) {
+        if (!map->entries[i].key) continue;
+        cs_value sv;
+        sv.type = CS_T_STR;
+        sv.as.p = map->entries[i].key;
+        cs_str_incref(map->entries[i].key);
+        list->items[list->len++] = sv;
     }
     
     return list_val;

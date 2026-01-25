@@ -54,11 +54,13 @@ Runs a file. Returns `true` on success, `nil`/error on failure.
 Runs a file once per resolved path.
 
 * Subsequent calls with the same resolved path return the cached exports without re-running.
-* Returns the module's exports (the last evaluated expression or explicit exports)
+* Returns the module's `exports` map.
 
-### `require_optional(path: string) -> bool | nil`
+### `require_optional(path: string) -> value | nil`
 
-Like `require()`, but returns `nil` if the file doesn't exist instead of throwing an error. Returns `true` if loaded successfully.
+Like `require()`, but returns `nil` if the file doesn't exist instead of throwing an error.
+
+If the file exists, it behaves like `require()` and returns the module exports.
 
 ## Error Handling
 
@@ -94,6 +96,14 @@ try {
   }
 }
 ```
+
+### `format_error(err) -> string`
+
+Formats an error object (as produced by `error()`) into a human-readable string, including stack trace when present.
+
+### `ERR -> map`
+
+Global map of common error codes (strings), intended to be used with `error(msg, code)`.
 
 ## Constructors
 
@@ -442,9 +452,27 @@ Returns current GC configuration:
 * `threshold` - Collection threshold (0 = disabled)
 * `alloc_trigger` - Allocation trigger interval (0 = disabled)
 
-### `gc_config(threshold, alloc_trigger)`
+### `gc_config(map) -> bool`
 
-Configures auto-GC policy. See [Implementation Notes](Implementation-Notes#garbage-collection) for details.
+Sets GC configuration from a map with optional fields:
+
+* `threshold` (int)
+* `alloc_trigger` (int)
+
+Returns `true`.
+
+### `gc_config(threshold, alloc_trigger) -> bool`
+
+Sets both values directly. Returns `true`.
+
+Auto-GC Policy:
+
+* GC can run when tracked objects >= `threshold`
+* GC can run every `alloc_trigger` allocations
+* Both policies can be enabled simultaneously
+* Setting either value to `0` disables that policy
+
+See [Implementation Notes](Implementation-Notes#garbage-collection) for details.
 
 ## Safety Controls
 
@@ -487,60 +515,3 @@ if (get_instruction_count() > get_instruction_limit() / 2) {
     set_instruction_limit(get_instruction_limit() * 2);
 }
 ```
-
-### `gc_stats() -> map`
-
-Returns a map with GC statistics:
-
-* `tracked` - Number of currently tracked objects (lists/maps)
-* `collections` - Total number of GC collections performed
-* `collected` - Total number of objects collected across all collections
-* `allocations` - Number of allocations since last GC
-
-Example:
-
-```c
-let stats = gc_stats();
-print("Tracked objects:", stats.tracked);
-print("Total collections:", stats.collections);
-print("Objects collected:", stats.collected);
-```
-
-### `gc_config() -> map`
-
-### `gc_config(map) -> bool`
-
-### `gc_config(threshold, alloc_trigger) -> bool`
-
-Get or set GC auto-collect configuration.
-
-Parameters:
-
-* `threshold` - Collect when tracked object count reaches this value (0 = disabled)
-* `alloc_trigger` - Collect after every N allocations (0 = disabled)
-
-Examples:
-
-```c
-// Get current configuration
-let config = gc_config();
-print("Threshold:", config.threshold);
-print("Alloc trigger:", config.alloc_trigger);
-
-// Set configuration with map
-gc_config({"threshold": 1000, "alloc_trigger": 500});
-
-// Set configuration with arguments
-gc_config(1000, 500);
-
-// Disable auto-GC
-gc_config(0, 0);
-```
-
-Auto-GC Policy:
-
-* GC automatically runs when tracked objects >= threshold
-* GC automatically runs every N allocations (list/map creations)
-* GC automatically runs after `cs_vm_run_file()` and `cs_vm_run_string()`
-* Both policies can be enabled simultaneously
-* Default: both disabled (manual `gc()` only)
