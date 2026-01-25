@@ -73,6 +73,9 @@ static token_type keyword_type(const char* s, size_t n) {
     if (n == 2 && memcmp(s, "if", 2) == 0) return TK_IF;
     if (n == 4 && memcmp(s, "else", 4) == 0) return TK_ELSE;
     if (n == 5 && memcmp(s, "while", 5) == 0) return TK_WHILE;
+    if (n == 6 && memcmp(s, "switch", 6) == 0) return TK_SWITCH;
+    if (n == 4 && memcmp(s, "case", 4) == 0) return TK_CASE;
+    if (n == 7 && memcmp(s, "default", 7) == 0) return TK_DEFAULT;
     if (n == 3 && memcmp(s, "for", 3) == 0) return TK_FOR;
     if (n == 2 && memcmp(s, "in", 2) == 0) return TK_IN;
     if (n == 6 && memcmp(s, "return", 6) == 0) return TK_RETURN;

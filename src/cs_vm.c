@@ -265,6 +265,9 @@ static void vm_dir_pop(cs_vm* vm) {
 
 static void vm_maybe_auto_gc(cs_vm* vm);  // Forward declaration
 static int list_push(cs_list_obj* l, cs_value v);  // Forward declaration
+static cs_range_obj* range_new(int64_t start, int64_t end, int64_t step, int inclusive);
+static void range_incref(cs_range_obj* r);
+static void range_decref(cs_range_obj* r);
 
 static int env_find(cs_env* e, const char* key);
 
@@ -492,6 +495,7 @@ static void strbuf_decref(cs_strbuf_obj* b) {
     free(b);
 }
 
+static cs_range_obj* as_range(cs_value v){ return (cs_range_obj*)v.as.p; }
 static void map_incref(cs_map_obj* m) { if (m) m->ref++; }
 
 static void map_decref(cs_map_obj* m) {
@@ -505,6 +509,29 @@ static void map_decref(cs_map_obj* m) {
     free(m->entries);
     vm_track_remove(m->owner, CS_TRACK_MAP, m);
     free(m);
+}
+
+static cs_range_obj* range_new(int64_t start, int64_t end, int64_t step, int inclusive) {
+    cs_range_obj* r = (cs_range_obj*)calloc(1, sizeof(cs_range_obj));
+    if (!r) return NULL;
+    r->ref = 1;
+    r->start = start;
+    r->end = end;
+    r->step = step;
+    r->inclusive = inclusive ? 1 : 0;
+    return r;
+}
+
+static void range_incref(cs_range_obj* r) {
+    if (r) r->ref++;
+}
+
+static void range_decref(cs_range_obj* r) {
+    if (!r) return;
+    r->ref--;
+    if (r->ref <= 0) {
+        free(r);
+    }
 }
 
 cs_value cs_list(cs_vm* vm) {
@@ -531,6 +558,7 @@ cs_value cs_value_copy(cs_value v) {
     else if (v.type == CS_T_LIST) list_incref(as_list(v));
     else if (v.type == CS_T_MAP) map_incref(as_map(v));
     else if (v.type == CS_T_STRBUF) strbuf_incref(as_strbuf(v));
+    else if (v.type == CS_T_RANGE) range_incref(as_range(v));
     else if (v.type == CS_T_NATIVE) as_native(v)->ref++;
     else if (v.type == CS_T_FUNC) as_func(v)->ref++;
     return v;
@@ -541,6 +569,7 @@ void cs_value_release(cs_value v) {
     else if (v.type == CS_T_LIST) list_decref(as_list(v));
     else if (v.type == CS_T_MAP) map_decref(as_map(v));
     else if (v.type == CS_T_STRBUF) strbuf_decref(as_strbuf(v));
+    else if (v.type == CS_T_RANGE) range_decref(as_range(v));
     else if (v.type == CS_T_NATIVE) {
         cs_native* nf = as_native(v);
         if (nf && --nf->ref <= 0) free(nf);
@@ -643,6 +672,25 @@ static int is_truthy(cs_value v) {
         case CS_T_BOOL: return v.as.b != 0;
         default: return 1;
     }
+}
+
+static int vm_value_equals(cs_value a, cs_value b) {
+    if (a.type != b.type) {
+        // Allow int == float comparison
+        if ((a.type == CS_T_INT && b.type == CS_T_FLOAT) || (a.type == CS_T_FLOAT && b.type == CS_T_INT)) {
+            double av = (a.type == CS_T_INT) ? (double)a.as.i : a.as.f;
+            double bv = (b.type == CS_T_INT) ? (double)b.as.i : b.as.f;
+            return av == bv;
+        }
+        return 0;
+    }
+
+    if (a.type == CS_T_NIL) return 1;
+    if (a.type == CS_T_BOOL) return a.as.b == b.as.b;
+    if (a.type == CS_T_INT) return a.as.i == b.as.i;
+    if (a.type == CS_T_FLOAT) return a.as.f == b.as.f;
+    if (a.type == CS_T_STR) return strcmp(as_str(a)->data, as_str(b)->data) == 0;
+    return a.as.p == b.as.p;
 }
 
 // ---------- list/map helpers ----------
@@ -1210,35 +1258,27 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
             if (!*ok) return cs_nil();
             cs_value end = eval_expr(vm, env, e->as.range.right, ok);
             if (!*ok) { cs_value_release(start); return cs_nil(); }
-            
-            // Convert to integers
+
+            if (!((start.type == CS_T_INT || start.type == CS_T_FLOAT) &&
+                  (end.type == CS_T_INT || end.type == CS_T_FLOAT))) {
+                cs_value_release(start);
+                cs_value_release(end);
+                vm_set_err(vm, "range expects int or float", e->source_name, e->line, e->col);
+                *ok = 0;
+                return cs_nil();
+            }
+
             int64_t s = (start.type == CS_T_INT) ? start.as.i : (int64_t)start.as.f;
             int64_t e_val = (end.type == CS_T_INT) ? end.as.i : (int64_t)end.as.f;
-            
+
             cs_value_release(start);
             cs_value_release(end);
-            
-            // Create a list
-            cs_value range_list = cs_list(vm);
-            if (!range_list.as.p) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
-            cs_list_obj* l = as_list(range_list);
-            
+
             int64_t step = (s <= e_val) ? 1 : -1;
-            int64_t limit = e->as.range.inclusive ? e_val : (e_val - step);
-            
-            for (int64_t i = s; step > 0 ? (i <= limit) : (i >= limit); i += step) {
-                cs_value item = cs_int(i);
-                if (!list_push(l, item)) {
-                    cs_value_release(item);
-                    cs_value_release(range_list);
-                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
-                    *ok = 0;
-                    return cs_nil();
-                }
-                cs_value_release(item);
-            }
-            
-            return range_list;
+            cs_range_obj* r = range_new(s, e_val, step, e->as.range.inclusive);
+            if (!r) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+            cs_value rv; rv.type = CS_T_RANGE; rv.as.p = r;
+            return rv;
         }
 
         case N_BINOP: {
@@ -1835,6 +1875,49 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
             return r;
         }
 
+        case N_SWITCH: {
+            int ok = 1;
+            cs_value sw = eval_expr(vm, env, s->as.switch_stmt.expr, &ok);
+            if (!ok) {
+                if (exec_take_vm_throw(vm, &r)) return r;
+                r.ok = 0;
+                return r;
+            }
+
+            int matched = 0;
+            for (size_t i = 0; i < s->as.switch_stmt.case_count && !matched; i++) {
+                cs_value cv = eval_expr(vm, env, s->as.switch_stmt.case_exprs[i], &ok);
+                if (!ok) {
+                    cs_value_release(sw);
+                    if (exec_take_vm_throw(vm, &r)) return r;
+                    r.ok = 0;
+                    return r;
+                }
+
+                matched = vm_value_equals(sw, cv);
+                cs_value_release(cv);
+
+                if (matched) {
+                    r = exec_stmt(vm, env, s->as.switch_stmt.case_blocks[i]);
+                    if (r.did_break) {
+                        r.did_break = 0; // break exits switch
+                    }
+                    cs_value_release(sw);
+                    return r;
+                }
+            }
+
+            if (!matched && s->as.switch_stmt.default_block) {
+                r = exec_stmt(vm, env, s->as.switch_stmt.default_block);
+                if (r.did_break) {
+                    r.did_break = 0; // break exits switch
+                }
+            }
+
+            cs_value_release(sw);
+            return r;
+        }
+
         case N_FNDEF: {
             struct cs_func* f = (struct cs_func*)calloc(1, sizeof(struct cs_func));
             if (!f) { vm_set_err(vm, "out of memory", s->source_name, s->line, s->col); r.ok = 0; return r; }
@@ -1944,8 +2027,38 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                     if (r.did_break) { r.did_break = 0; break; }
                     if (r.did_continue) { r.did_continue = 0; continue; }
                 }
+            } else if (it.type == CS_T_RANGE) {
+                cs_range_obj* rg = as_range(it);
+                if (rg) {
+                    int64_t step = (rg->step == 0) ? ((rg->start <= rg->end) ? 1 : -1) : rg->step;
+                    if (step > 0) {
+                        int64_t limit = rg->inclusive ? rg->end : (rg->end - 1);
+                        for (int64_t i = rg->start; i <= limit; i += step) {
+                            cs_value v = cs_int(i);
+                            env_set_here(loopenv, s->as.forin_stmt.name, v);
+                            cs_value_release(v);
+
+                            r = exec_stmt(vm, loopenv, s->as.forin_stmt.body);
+                            if (!r.ok || r.did_return || r.did_throw) break;
+                            if (r.did_break) { r.did_break = 0; break; }
+                            if (r.did_continue) { r.did_continue = 0; continue; }
+                        }
+                    } else {
+                        int64_t limit = rg->inclusive ? rg->end : (rg->end + 1);
+                        for (int64_t i = rg->start; i >= limit; i += step) {
+                            cs_value v = cs_int(i);
+                            env_set_here(loopenv, s->as.forin_stmt.name, v);
+                            cs_value_release(v);
+
+                            r = exec_stmt(vm, loopenv, s->as.forin_stmt.body);
+                            if (!r.ok || r.did_return || r.did_throw) break;
+                            if (r.did_break) { r.did_break = 0; break; }
+                            if (r.did_continue) { r.did_continue = 0; continue; }
+                        }
+                    }
+                }
             } else {
-                vm_set_err(vm, "for-in expects list or map", s->source_name, s->line, s->col);
+                vm_set_err(vm, "for-in expects list, map, or range", s->source_name, s->line, s->col);
                 r.ok = 0;
             }
 
@@ -1957,8 +2070,9 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
         case N_FOR_C_STYLE: {
             // Execute init (can be statement or expression)
             if (s->as.for_c_style_stmt.init) {
-                if (s->as.for_c_style_stmt.init->type == N_ASSIGN) {
-                    // It's an assignment statement
+                node_type it = s->as.for_c_style_stmt.init->type;
+                if (it == N_ASSIGN || it == N_SETINDEX || it == N_LET) {
+                    // It's a statement
                     exec_result init_r = exec_stmt(vm, env, s->as.for_c_style_stmt.init);
                     if (!init_r.ok || init_r.did_throw) {
                         return init_r;
@@ -2004,8 +2118,9 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                 
                 // Execute increment (can be statement or expression)
                 if (s->as.for_c_style_stmt.incr) {
-                    if (s->as.for_c_style_stmt.incr->type == N_ASSIGN) {
-                        // It's an assignment statement
+                    node_type it = s->as.for_c_style_stmt.incr->type;
+                    if (it == N_ASSIGN || it == N_SETINDEX || it == N_LET) {
+                        // It's a statement
                         exec_result incr_r = exec_stmt(vm, env, s->as.for_c_style_stmt.incr);
                         if (!incr_r.ok || incr_r.did_throw) {
                             return incr_r;

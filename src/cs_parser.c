@@ -58,6 +58,73 @@ static ast* parse_stmt(parser* P);
 static ast* parse_block(parser* P);
 static ast* parse_expr(parser* P);
 
+static ast* parse_switch(parser* P) {
+    ast* n = node(P, N_SWITCH);
+
+    expect(P, TK_LPAREN, "expected '(' after switch");
+    n->as.switch_stmt.expr = parse_expr(P);
+    expect(P, TK_RPAREN, "expected ')' after switch expression");
+
+    expect(P, TK_LBRACE, "expected '{' after switch(...)");
+
+    size_t cap = 4, cnt = 0;
+    ast** case_exprs = (ast**)malloc(sizeof(ast*) * cap);
+    ast** case_blocks = (ast**)malloc(sizeof(ast*) * cap);
+    ast* default_block = NULL;
+
+    if (!case_exprs || !case_blocks) {
+        free(case_exprs);
+        free(case_blocks);
+        if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory");
+        // best-effort parse recovery: consume until end of switch block
+        while (P->tok.type != TK_RBRACE && P->tok.type != TK_EOF) next(P);
+        (void)expect(P, TK_RBRACE, "expected '}' after switch");
+        n->as.switch_stmt.case_exprs = NULL;
+        n->as.switch_stmt.case_blocks = NULL;
+        n->as.switch_stmt.case_count = 0;
+        n->as.switch_stmt.default_block = NULL;
+        return n;
+    }
+
+    while (P->tok.type != TK_RBRACE && P->tok.type != TK_EOF && !P->error) {
+        if (accept(P, TK_CASE)) {
+            if (cnt == cap) {
+                cap *= 2;
+                ast** ne = (ast**)realloc(case_exprs, sizeof(ast*) * cap);
+                if (!ne) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
+                case_exprs = ne;
+                ast** nb = (ast**)realloc(case_blocks, sizeof(ast*) * cap);
+                if (!nb) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
+                case_blocks = nb;
+            }
+            case_exprs[cnt] = parse_expr(P);
+            case_blocks[cnt] = parse_block(P);
+            cnt++;
+            continue;
+        }
+
+        if (accept(P, TK_DEFAULT)) {
+            if (default_block) {
+                if (!P->error) P->error = fmt_err(P, &P->tok, "duplicate default in switch");
+                break;
+            }
+            default_block = parse_block(P);
+            continue;
+        }
+
+        if (!P->error) P->error = fmt_err(P, &P->tok, "expected 'case' or 'default' in switch");
+        break;
+    }
+
+    expect(P, TK_RBRACE, "expected '}' after switch");
+
+    n->as.switch_stmt.case_exprs = case_exprs;
+    n->as.switch_stmt.case_blocks = case_blocks;
+    n->as.switch_stmt.case_count = cnt;
+    n->as.switch_stmt.default_block = default_block;
+    return n;
+}
+
 static ast* parse_fn_expr(parser* P) {
     ast* n = node(P, N_FUNCLIT);
     expect(P, TK_LPAREN, "expected '(' after fn");
@@ -129,7 +196,10 @@ static ast* parse_primary(parser* P) {
             while (1) {
                 if (cnt == cap) { cap *= 2; items = (ast**)realloc(items, sizeof(ast*) * cap); }
                 items[cnt++] = parse_expr(P);
-                if (accept(P, TK_COMMA)) continue;
+                if (accept(P, TK_COMMA)) {
+                    if (P->tok.type == TK_RBRACKET) break;
+                    continue;
+                }
                 break;
             }
         }
@@ -157,7 +227,10 @@ static ast* parse_primary(parser* P) {
                 expect(P, TK_COLON, "expected ':' in map literal");
                 vals[cnt] = parse_expr(P);
                 cnt++;
-                if (accept(P, TK_COMMA)) continue;
+                if (accept(P, TK_COMMA)) {
+                    if (P->tok.type == TK_RBRACE) break;
+                    continue;
+                }
                 break;
             }
         }
@@ -182,18 +255,6 @@ static ast* parse_primary(parser* P) {
         ast* expr = node(P, N_IDENT);
         expr->as.ident.name = cs_strndup2(P->tok.start, P->tok.len);
         next(P);
-
-        while (accept(P, TK_DOT)) {
-            if (P->tok.type != TK_IDENT) {
-                if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after '.'");
-                break;
-            }
-            ast* gf = node(P, N_GETFIELD);
-            gf->as.getfield.target = expr;
-            gf->as.getfield.field = cs_strndup2(P->tok.start, P->tok.len);
-            next(P);
-            expr = gf;
-        }
         return expr;
     }
 
@@ -236,6 +297,18 @@ static ast* parse_call(parser* P) {
             idx->as.index.index = parse_expr(P);
             expect(P, TK_RBRACKET, "expected ']'");
             expr = idx;
+            continue;
+        }
+        if (accept(P, TK_DOT)) {
+            if (P->tok.type != TK_IDENT) {
+                if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after '.'");
+                break;
+            }
+            ast* gf = node(P, N_GETFIELD);
+            gf->as.getfield.target = expr;
+            gf->as.getfield.field = cs_strndup2(P->tok.start, P->tok.len);
+            next(P);
+            expr = gf;
             continue;
         }
         break;
@@ -384,15 +457,7 @@ static ast* make_quoted_str_lit(parser* P, const char* s) {
 }
 
 static ast* parse_lvalue(parser* P) {
-    ast* expr = parse_primary(P);
-    while (accept(P, TK_LBRACKET)) {
-        ast* idx = node(P, N_INDEX);
-        idx->as.index.target = expr;
-        idx->as.index.index = parse_expr(P);
-        expect(P, TK_RBRACKET, "expected ']'");
-        expr = idx;
-    }
-    return expr;
+    return parse_call(P);
 }
 
 static ast* parse_fn(parser* P) {
@@ -451,6 +516,55 @@ static ast* parse_block(parser* P) {
     return b;
 }
 
+static ast* build_assignment(parser* P, ast* lv, token_type op, ast* rhs) {
+    if (lv && lv->type == N_IDENT) {
+        ast* n = node(P, N_ASSIGN);
+        n->as.assign_stmt.name = lv->as.ident.name;
+        lv->as.ident.name = NULL; // transfer ownership
+        if (op == TK_ASSIGN) n->as.assign_stmt.value = rhs;
+        else {
+            int bop = TK_PLUS;
+            if (op == TK_MINUSEQ) bop = TK_MINUS;
+            else if (op == TK_STAREQ) bop = TK_STAR;
+            else if (op == TK_SLASHEQ) bop = TK_SLASH;
+            ast* left = node(P, N_IDENT);
+            left->as.ident.name = cs_strndup2(n->as.assign_stmt.name, strlen(n->as.assign_stmt.name));
+            ast* bin = node(P, N_BINOP);
+            bin->as.binop.op = bop;
+            bin->as.binop.left = left;
+            bin->as.binop.right = rhs;
+            n->as.assign_stmt.value = bin;
+        }
+        return n;
+    }
+    if (lv && lv->type == N_INDEX) {
+        if (op != TK_ASSIGN) {
+            if (!P->error) P->error = fmt_err(P, &P->tok, "compound assignment only supported for variables");
+            return lv;
+        }
+        ast* n = node(P, N_SETINDEX);
+        n->as.setindex_stmt.target = lv->as.index.target;
+        n->as.setindex_stmt.index = lv->as.index.index;
+        n->as.setindex_stmt.value = rhs;
+        return n;
+    }
+    if (lv && lv->type == N_GETFIELD) {
+        if (op != TK_ASSIGN) {
+            if (!P->error) P->error = fmt_err(P, &P->tok, "compound assignment only supported for variables");
+            return lv;
+        }
+        ast* idx = make_quoted_str_lit(P, lv->as.getfield.field);
+        if (!idx) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); return lv; }
+        ast* n = node(P, N_SETINDEX);
+        n->as.setindex_stmt.target = lv->as.getfield.target;
+        n->as.setindex_stmt.index = idx;
+        n->as.setindex_stmt.value = rhs;
+        return n;
+    }
+    if (!P->error) P->error = fmt_err(P, &P->tok, "invalid assignment target");
+    return lv;
+}
+
 static ast* parse_stmt(parser* P) {
     if (accept(P, TK_BREAK)) {
         ast* n = node(P, N_BREAK);
@@ -462,6 +576,10 @@ static ast* parse_stmt(parser* P) {
         ast* n = node(P, N_CONTINUE);
         maybe_semi(P);
         return n;
+    }
+
+    if (accept(P, TK_SWITCH)) {
+        return parse_switch(P);
     }
 
     if (accept(P, TK_THROW)) {
@@ -496,6 +614,21 @@ static ast* parse_stmt(parser* P) {
             
             // Parse init (can be empty, or an assignment statement)
             if (P->tok.type != TK_SEMI) {
+                if (accept(P, TK_LET)) {
+                    ast* letn = node(P, N_LET);
+                    if (P->tok.type != TK_IDENT) {
+                        if (!P->error) P->error = fmt_err(P, &P->tok, "expected name after let");
+                        return n;
+                    }
+                    letn->as.let_stmt.name = cs_strndup2(P->tok.start, P->tok.len);
+                    next(P);
+                    if (accept(P, TK_ASSIGN)) {
+                        letn->as.let_stmt.init = parse_expr(P);
+                    } else {
+                        letn->as.let_stmt.init = NULL;
+                    }
+                    n->as.for_c_style_stmt.init = letn;
+                } else {
                 // Try to parse as assignment (check for identifier followed by =)
                 if (P->tok.type == TK_IDENT) {
                     lexer saveL = P->L;
@@ -509,18 +642,10 @@ static ast* parse_stmt(parser* P) {
                         P->tok = saveT;
                         
                         ast* lv = parse_lvalue(P);
+                        token_type op = P->tok.type;
                         next(P);
                         ast* rhs = parse_expr(P);
-                        
-                        if (lv && lv->type == N_IDENT) {
-                            ast* assign = node(P, N_ASSIGN);
-                            assign->as.assign_stmt.name = lv->as.ident.name;
-                            lv->as.ident.name = NULL;
-                            assign->as.assign_stmt.value = rhs;
-                            n->as.for_c_style_stmt.init = assign;
-                        } else {
-                            n->as.for_c_style_stmt.init = parse_expr(P);
-                        }
+                        n->as.for_c_style_stmt.init = build_assignment(P, lv, op, rhs);
                     } else {
                         // Not an assignment, rewind and parse as expression
                         P->L = saveL;
@@ -529,6 +654,7 @@ static ast* parse_stmt(parser* P) {
                     }
                 } else {
                     n->as.for_c_style_stmt.init = parse_expr(P);
+                }
                 }
             } else {
                 n->as.for_c_style_stmt.init = NULL;
@@ -558,18 +684,10 @@ static ast* parse_stmt(parser* P) {
                         P->tok = saveT;
                         
                         ast* lv = parse_lvalue(P);
+                        token_type op = P->tok.type;
                         next(P);
                         ast* rhs = parse_expr(P);
-                        
-                        if (lv && lv->type == N_IDENT) {
-                            ast* assign = node(P, N_ASSIGN);
-                            assign->as.assign_stmt.name = lv->as.ident.name;
-                            lv->as.ident.name = NULL;
-                            assign->as.assign_stmt.value = rhs;
-                            n->as.for_c_style_stmt.incr = assign;
-                        } else {
-                            n->as.for_c_style_stmt.incr = parse_expr(P);
-                        }
+                        n->as.for_c_style_stmt.incr = build_assignment(P, lv, op, rhs);
                     } else {
                         // Not an assignment, rewind and parse as expression
                         P->L = saveL;
@@ -680,51 +798,7 @@ static ast* parse_stmt(parser* P) {
             ast* rhs = parse_expr(P);
             maybe_semi(P);
 
-            if (lv && lv->type == N_IDENT) {
-                ast* n = node(P, N_ASSIGN);
-                n->as.assign_stmt.name = lv->as.ident.name;
-                lv->as.ident.name = NULL; // transfer ownership
-                if (op == TK_ASSIGN) n->as.assign_stmt.value = rhs;
-                else {
-                    int bop = TK_PLUS;
-                    if (op == TK_MINUSEQ) bop = TK_MINUS;
-                    else if (op == TK_STAREQ) bop = TK_STAR;
-                    else if (op == TK_SLASHEQ) bop = TK_SLASH;
-                    ast* left = node(P, N_IDENT);
-                    left->as.ident.name = cs_strndup2(n->as.assign_stmt.name, strlen(n->as.assign_stmt.name));
-                    ast* bin = node(P, N_BINOP);
-                    bin->as.binop.op = bop;
-                    bin->as.binop.left = left;
-                    bin->as.binop.right = rhs;
-                    n->as.assign_stmt.value = bin;
-                }
-                return n;
-            }
-            if (lv && lv->type == N_INDEX) {
-                if (op != TK_ASSIGN) {
-                    if (!P->error) P->error = fmt_err(P, &P->tok, "compound assignment only supported for variables");
-                    return lv;
-                }
-                ast* n = node(P, N_SETINDEX);
-                n->as.setindex_stmt.target = lv->as.index.target;
-                n->as.setindex_stmt.index = lv->as.index.index;
-                n->as.setindex_stmt.value = rhs;
-                return n;
-            }
-            if (lv && lv->type == N_GETFIELD) {
-                if (op != TK_ASSIGN) {
-                    if (!P->error) P->error = fmt_err(P, &P->tok, "compound assignment only supported for variables");
-                    return lv;
-                }
-                ast* idx = make_quoted_str_lit(P, lv->as.getfield.field);
-                if (!idx) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); return lv; }
-                ast* n = node(P, N_SETINDEX);
-                n->as.setindex_stmt.target = lv->as.getfield.target;
-                n->as.setindex_stmt.index = idx;
-                n->as.setindex_stmt.value = rhs;
-                return n;
-            }
-            if (!P->error) P->error = fmt_err(P, &P->tok, "invalid assignment target");
+            return build_assignment(P, lv, op, rhs);
         }
     }
 
@@ -773,6 +847,16 @@ void ast_free(ast* node) {
             ast_free(node->as.setindex_stmt.target);
             ast_free(node->as.setindex_stmt.index);
             ast_free(node->as.setindex_stmt.value);
+            break;
+        case N_SWITCH:
+            ast_free(node->as.switch_stmt.expr);
+            for (size_t i = 0; i < node->as.switch_stmt.case_count; i++) {
+                ast_free(node->as.switch_stmt.case_exprs[i]);
+                ast_free(node->as.switch_stmt.case_blocks[i]);
+            }
+            free(node->as.switch_stmt.case_exprs);
+            free(node->as.switch_stmt.case_blocks);
+            ast_free(node->as.switch_stmt.default_block);
             break;
         case N_FORIN:
             free(node->as.forin_stmt.name);

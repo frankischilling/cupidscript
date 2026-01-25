@@ -19,6 +19,7 @@ typedef enum {
     CS_T_LIST,
     CS_T_MAP,
     CS_T_STRBUF,
+    CS_T_RANGE,
     CS_T_FUNC,
     CS_T_NATIVE
 } cs_type;

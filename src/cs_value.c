@@ -59,6 +59,7 @@ const char* cs_type_name_impl(cs_type t) {
         case CS_T_LIST:   return "list";
         case CS_T_MAP:    return "map";
         case CS_T_STRBUF: return "strbuf";
+        case CS_T_RANGE:  return "range";
         case CS_T_FUNC:   return "function";
         case CS_T_NATIVE: return "native";
         default:          return "unknown";

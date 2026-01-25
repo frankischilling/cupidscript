@@ -90,6 +90,15 @@ static const char* value_repr(cs_value v, char* buf, size_t buf_sz) {
             snprintf(buf, buf_sz, "<strbuf len=%lld>", (long long)(b ? b->len : 0));
             return buf;
         }
+        case CS_T_RANGE: {
+            cs_range_obj* r = (cs_range_obj*)v.as.p;
+            if (!r) return "<range>";
+            snprintf(buf, buf_sz, "<range %lld..%s%lld>",
+                (long long)r->start,
+                r->inclusive ? "=" : "",
+                (long long)r->end);
+            return buf;
+        }
         case CS_T_FUNC:   return "<function>";
         case CS_T_NATIVE: return "<native>";
         default:          return "<obj>";
@@ -959,33 +968,15 @@ static int nf_range(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_valu
         return 1;
     }
     
-    cs_value lv = cs_list(vm);
-    if (!lv.as.p) { cs_error(vm, "out of memory"); return 1; }
-    cs_list_obj* l = (cs_list_obj*)lv.as.p;
-    
-    if (step > 0) {
-        for (int64_t i = start; i < end; i += step) {
-            cs_value v = cs_int(i);
-            if (!list_ensure(l, l->len + 1)) {
-                cs_value_release(lv);
-                cs_error(vm, "out of memory");
-                return 1;
-            }
-            l->items[l->len++] = v;
-        }
-    } else {
-        for (int64_t i = start; i > end; i += step) {
-            cs_value v = cs_int(i);
-            if (!list_ensure(l, l->len + 1)) {
-                cs_value_release(lv);
-                cs_error(vm, "out of memory");
-                return 1;
-            }
-            l->items[l->len++] = v;
-        }
-    }
-    
-    *out = lv;
+    cs_range_obj* r = (cs_range_obj*)calloc(1, sizeof(cs_range_obj));
+    if (!r) { cs_error(vm, "out of memory"); return 1; }
+    r->ref = 1;
+    r->start = start;
+    r->end = end;
+    r->step = step;
+    r->inclusive = 0;
+    out->type = CS_T_RANGE;
+    out->as.p = r;
     return 0;
 }
 

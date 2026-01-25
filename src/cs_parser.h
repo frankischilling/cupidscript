@@ -13,6 +13,7 @@ typedef enum {
     N_SETINDEX,
     N_BREAK,
     N_CONTINUE,
+    N_SWITCH,
     N_FORIN,
     N_FOR_C_STYLE,
     N_THROW,
@@ -52,6 +53,13 @@ struct ast {
         struct { char* name; ast* init; } let_stmt;
         struct { char* name; ast* value; } assign_stmt;
         struct { ast* target; ast* index; ast* value; } setindex_stmt;
+        struct {
+            ast* expr;
+            ast** case_exprs;
+            ast** case_blocks;
+            size_t case_count;
+            ast* default_block; // optional
+        } switch_stmt;
         struct { char* name; ast* iterable; ast* body; } forin_stmt;
         struct { ast* init; ast* cond; ast* incr; ast* body; } for_c_style_stmt;
         struct { ast* value; } throw_stmt;

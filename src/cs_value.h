@@ -47,6 +47,14 @@ typedef struct cs_strbuf_obj {
     char* data;
 } cs_strbuf_obj;
 
+typedef struct cs_range_obj {
+    int ref;
+    int64_t start;
+    int64_t end;
+    int64_t step;
+    int inclusive;
+} cs_range_obj;
+
 // refcounted heap objects
 cs_string* cs_str_new(const char* s);
 cs_string* cs_str_new_take(char* owned, size_t len);
