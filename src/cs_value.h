@@ -21,6 +21,7 @@ typedef struct cs_native {
 
 typedef struct cs_list_obj {
     int ref;
+    cs_vm* owner;
     size_t len;
     size_t cap;
     cs_value* items;
@@ -33,6 +34,7 @@ typedef struct cs_map_entry {
 
 typedef struct cs_map_obj {
     int ref;
+    cs_vm* owner;
     size_t len;
     size_t cap;
     cs_map_entry* entries;

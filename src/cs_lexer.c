@@ -39,6 +39,7 @@ static void skip_ws_and_comments(lexer* L) {
 }
 
 static token make_tok(lexer* L, token_type t, const char* start, size_t len, long long iv, int line, int col) {
+    (void)L;
     token tok;
     tok.type = t;
     tok.start = start;
@@ -58,7 +59,14 @@ static token_type keyword_type(const char* s, size_t n) {
     if (n == 2 && memcmp(s, "if", 2) == 0) return TK_IF;
     if (n == 4 && memcmp(s, "else", 4) == 0) return TK_ELSE;
     if (n == 5 && memcmp(s, "while", 5) == 0) return TK_WHILE;
+    if (n == 3 && memcmp(s, "for", 3) == 0) return TK_FOR;
+    if (n == 2 && memcmp(s, "in", 2) == 0) return TK_IN;
     if (n == 6 && memcmp(s, "return", 6) == 0) return TK_RETURN;
+    if (n == 5 && memcmp(s, "break", 5) == 0) return TK_BREAK;
+    if (n == 8 && memcmp(s, "continue", 8) == 0) return TK_CONTINUE;
+    if (n == 5 && memcmp(s, "throw", 5) == 0) return TK_THROW;
+    if (n == 3 && memcmp(s, "try", 3) == 0) return TK_TRY;
+    if (n == 5 && memcmp(s, "catch", 5) == 0) return TK_CATCH;
     if (n == 4 && memcmp(s, "true", 4) == 0) return TK_TRUE;
     if (n == 5 && memcmp(s, "false", 5) == 0) return TK_FALSE;
     if (n == 3 && memcmp(s, "nil", 3) == 0) return TK_NIL;
@@ -82,13 +90,84 @@ token lex_next(lexer* L) {
     char c = peek(L);
     if (!c) return make_tok(L, TK_EOF, start, 0, 0, line, col);
 
-    // numbers
+    // numbers (decimal with underscores, hex 0xFF, or floats 3.14)
     if (isdigit((unsigned char)c)) {
         long long v = 0;
-        while (isdigit((unsigned char)peek(L))) {
-            v = (v * 10) + (advance(L) - '0');
+        double fv = 0.0;
+        int is_hex = 0;
+        int is_float = 0;
+
+        if (c == '0' && (peek2(L) == 'x' || peek2(L) == 'X')) {
+            is_hex = 1;
+            advance(L); // 0
+            advance(L); // x
+            while (1) {
+                char h = peek(L);
+                if (h == '_') { advance(L); continue; }
+                if (isdigit((unsigned char)h)) { v = (v * 16) + (advance(L) - '0'); continue; }
+                if (h >= 'a' && h <= 'f') { v = (v * 16) + (advance(L) - 'a' + 10); continue; }
+                if (h >= 'A' && h <= 'F') { v = (v * 16) + (advance(L) - 'A' + 10); continue; }
+                break;
+            }
+        } else {
+            // Parse integer part
+            while (1) {
+                char d = peek(L);
+                if (d == '_') { advance(L); continue; }
+                if (!isdigit((unsigned char)d)) break;
+                v = (v * 10) + (advance(L) - '0');
+            }
+            
+            // Check for decimal point
+            if (peek(L) == '.' && isdigit((unsigned char)peek2(L))) {
+                is_float = 1;
+                fv = (double)v;
+                advance(L); // consume '.'
+                
+                double frac = 0.0;
+                double divisor = 10.0;
+                while (1) {
+                    char d = peek(L);
+                    if (d == '_') { advance(L); continue; }
+                    if (!isdigit((unsigned char)d)) break;
+                    frac += (advance(L) - '0') / divisor;
+                    divisor *= 10.0;
+                }
+                fv += frac;
+            }
+            
+            // Check for exponent (works with or without decimal point)
+            if (peek(L) == 'e' || peek(L) == 'E') {
+                if (!is_float) {
+                    is_float = 1;
+                    fv = (double)v;
+                }
+                advance(L);
+                int exp_sign = 1;
+                if (peek(L) == '+') advance(L);
+                else if (peek(L) == '-') { exp_sign = -1; advance(L); }
+                
+                int exp = 0;
+                while (isdigit((unsigned char)peek(L))) {
+                    exp = exp * 10 + (advance(L) - '0');
+                }
+                
+                double multiplier = 1.0;
+                for (int i = 0; i < exp; i++) {
+                    multiplier *= 10.0;
+                }
+                if (exp_sign < 0) fv /= multiplier;
+                else fv *= multiplier;
+            }
         }
+
+        (void)is_hex;
         size_t len = (size_t)(&L->src[L->pos] - start);
+        if (is_float) {
+            token tok = make_tok(L, TK_FLOAT, start, len, 0, line, col);
+            tok.float_val = fv;
+            return tok;
+        }
         return make_tok(L, TK_INT, start, len, v, line, col);
     }
 
@@ -128,12 +207,39 @@ token lex_next(lexer* L) {
         case '}': t = TK_RBRACE; break;
         case ',': t = TK_COMMA; break;
         case ';': t = TK_SEMI; break;
-        case '.': t = TK_DOT; break;
+        case '.':
+            // Check for .. or ..=
+            if (peek(L) == '.') {
+                advance(L);
+                if (peek(L) == '=') {
+                    advance(L);
+                    t = TK_RANGE_INC;
+                } else {
+                    t = TK_RANGE;
+                }
+            } else {
+                t = TK_DOT;
+            }
+            break;
+        case ':': t = TK_COLON; break;
+        case '?': t = TK_QMARK; break;
 
-        case '+': t = TK_PLUS; break;
-        case '-': t = TK_MINUS; break;
-        case '*': t = TK_STAR; break;
-        case '/': t = TK_SLASH; break;
+        case '+':
+            if (peek(L) == '=') { advance(L); t = TK_PLUSEQ; }
+            else t = TK_PLUS;
+            break;
+        case '-':
+            if (peek(L) == '=') { advance(L); t = TK_MINUSEQ; }
+            else t = TK_MINUS;
+            break;
+        case '*':
+            if (peek(L) == '=') { advance(L); t = TK_STAREQ; }
+            else t = TK_STAR;
+            break;
+        case '/':
+            if (peek(L) == '=') { advance(L); t = TK_SLASHEQ; }
+            else t = TK_SLASH;
+            break;
         case '%': t = TK_PERCENT; break;
 
         case '!':

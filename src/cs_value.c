@@ -54,6 +54,7 @@ const char* cs_type_name_impl(cs_type t) {
         case CS_T_NIL:    return "nil";
         case CS_T_BOOL:   return "bool";
         case CS_T_INT:    return "int";
+        case CS_T_FLOAT:  return "float";
         case CS_T_STR:    return "string";
         case CS_T_LIST:   return "list";
         case CS_T_MAP:    return "map";

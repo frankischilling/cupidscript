@@ -30,7 +30,7 @@ $(LIB): $(CS_OBJS)
 	$(AR) $(ARFLAGS) $@ $^
 
 $(BIN): $(CS_OBJS) $(CLI_OBJS)
-	$(CC) $(CFLAGS) -Isrc $^ -o $@
+	$(CC) $(CFLAGS) -Isrc $^ -o $@ -lm
 
 clean:
 	rm -rf $(OBJDIR) $(BINDIR)

@@ -11,6 +11,12 @@ typedef enum {
     N_LET,
     N_ASSIGN,
     N_SETINDEX,
+    N_BREAK,
+    N_CONTINUE,
+    N_FORIN,
+    N_FOR_C_STYLE,
+    N_THROW,
+    N_TRY,
     N_IF,
     N_WHILE,
     N_RETURN,
@@ -19,12 +25,17 @@ typedef enum {
 
     N_BINOP,
     N_UNOP,
+    N_RANGE,
+    N_TERNARY,
     N_CALL,
     N_INDEX,
     N_GETFIELD,
+    N_LISTLIT,
+    N_MAPLIT,
     N_FUNCLIT,
     N_IDENT,
     N_LIT_INT,
+    N_LIT_FLOAT,
     N_LIT_STR,
     N_LIT_BOOL,
     N_LIT_NIL
@@ -41,6 +52,10 @@ struct ast {
         struct { char* name; ast* init; } let_stmt;
         struct { char* name; ast* value; } assign_stmt;
         struct { ast* target; ast* index; ast* value; } setindex_stmt;
+        struct { char* name; ast* iterable; ast* body; } forin_stmt;
+        struct { ast* init; ast* cond; ast* incr; ast* body; } for_c_style_stmt;
+        struct { ast* value; } throw_stmt;
+        struct { ast* try_b; char* catch_name; ast* catch_b; } try_stmt;
 
         struct { ast* cond; ast* then_b; ast* else_b; } if_stmt;
         struct { ast* cond; ast* body; } while_stmt;
@@ -57,15 +72,20 @@ struct ast {
 
         struct { int op; ast* left; ast* right; } binop;
         struct { int op; ast* expr; } unop;
+        struct { ast* left; ast* right; int inclusive; } range;
+        struct { ast* cond; ast* then_e; ast* else_e; } ternary;
 
         struct { ast* callee; ast** args; size_t argc; } call;
         struct { ast* target; ast* index; } index;
         struct { ast* target; char* field; } getfield;
         struct { char** params; size_t param_count; ast* body; } funclit;
+        struct { ast** items; size_t count; } listlit;
+        struct { ast** keys; ast** vals; size_t count; } maplit;
 
         struct { char* name; } ident;
 
         struct { long long v; } lit_int;
+        struct { double v; } lit_float;
         struct { char* s; } lit_str;
         struct { int v; } lit_bool;
     } as;
