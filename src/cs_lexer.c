@@ -122,6 +122,8 @@ token lex_next(lexer* L) {
     switch (c) {
         case '(': t = TK_LPAREN; break;
         case ')': t = TK_RPAREN; break;
+        case '[': t = TK_LBRACKET; break;
+        case ']': t = TK_RBRACKET; break;
         case '{': t = TK_LBRACE; break;
         case '}': t = TK_RBRACE; break;
         case ',': t = TK_COMMA; break;
@@ -168,4 +170,3 @@ token lex_next(lexer* L) {
 
     return make_tok(L, t, start, (size_t)(&L->src[L->pos] - start), 0, line, col);
 }
-

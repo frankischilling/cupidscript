@@ -24,6 +24,7 @@ typedef enum {
 
     // punctuation
     TK_LPAREN, TK_RPAREN,
+    TK_LBRACKET, TK_RBRACKET,
     TK_LBRACE, TK_RBRACE,
     TK_COMMA,
     TK_SEMI,
@@ -60,4 +61,3 @@ void  lex_init(lexer* L, const char* src);
 token lex_next(lexer* L);
 
 #endif
-

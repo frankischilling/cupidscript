@@ -18,6 +18,25 @@ typedef struct cs_native {
     void* userdata;
 } cs_native;
 
+typedef struct cs_list_obj {
+    int ref;
+    size_t len;
+    size_t cap;
+    cs_value* items;
+} cs_list_obj;
+
+typedef struct cs_map_entry {
+    cs_string* key;
+    cs_value val;
+} cs_map_entry;
+
+typedef struct cs_map_obj {
+    int ref;
+    size_t len;
+    size_t cap;
+    cs_map_entry* entries;
+} cs_map_obj;
+
 // refcounted heap objects
 cs_string* cs_str_new(const char* s);
 void       cs_str_incref(cs_string* s);

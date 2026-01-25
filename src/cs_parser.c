@@ -11,17 +11,19 @@ static char* cs_strndup2(const char* s, size_t n) {
     return p;
 }
 
-static char* fmt_err(const token* t, const char* msg) {
+static char* fmt_err(const parser* P, const token* t, const char* msg) {
     char buf[256];
-    snprintf(buf, sizeof(buf), "Parse error at %d:%d: %s", t->line, t->col, msg);
+    const char* src = (P && P->source_name) ? P->source_name : "<input>";
+    snprintf(buf, sizeof(buf), "Parse error at %s:%d:%d: %s", src, t->line, t->col, msg);
     return cs_strndup2(buf, strlen(buf));
 }
 
 static void next(parser* P) { P->tok = lex_next(&P->L); }
 
-void parser_init(parser* P, const char* src) {
+void parser_init(parser* P, const char* src, const char* source_name) {
     memset(P, 0, sizeof(*P));
     lex_init(&P->L, src);
+    P->source_name = source_name ? source_name : "<input>";
     next(P);
 }
 
@@ -34,6 +36,7 @@ static ast* node(parser* P, node_type t) {
     ast* n = (ast*)calloc(1, sizeof(ast));
     if (!n) return NULL;
     n->type = t;
+    n->source_name = P->source_name;
     n->line = P->tok.line;
     n->col  = P->tok.col;
     return n;
@@ -46,7 +49,7 @@ static int accept(parser* P, token_type t) {
 
 static int expect(parser* P, token_type t, const char* msg) {
     if (P->tok.type == t) { next(P); return 1; }
-    if (!P->error) P->error = fmt_err(&P->tok, msg);
+    if (!P->error) P->error = fmt_err(P, &P->tok, msg);
     return 0;
 }
 
@@ -54,6 +57,36 @@ static int expect(parser* P, token_type t, const char* msg) {
 static ast* parse_stmt(parser* P);
 static ast* parse_block(parser* P);
 static ast* parse_expr(parser* P);
+
+static ast* parse_fn_expr(parser* P) {
+    ast* n = node(P, N_FUNCLIT);
+    expect(P, TK_LPAREN, "expected '(' after fn");
+
+    size_t cap = 4, cnt = 0;
+    char** params = NULL;
+
+    if (P->tok.type != TK_RPAREN) {
+        params = (char**)malloc(sizeof(char*) * cap);
+        while (1) {
+            if (P->tok.type != TK_IDENT) {
+                if (!P->error) P->error = fmt_err(P, &P->tok, "expected parameter name");
+                break;
+            }
+            if (cnt == cap) { cap *= 2; params = (char**)realloc(params, sizeof(char*) * cap); }
+            params[cnt++] = cs_strndup2(P->tok.start, P->tok.len);
+            next(P);
+
+            if (accept(P, TK_COMMA)) continue;
+            break;
+        }
+    }
+    expect(P, TK_RPAREN, "expected ')' after parameters");
+
+    n->as.funclit.params = params;
+    n->as.funclit.param_count = cnt;
+    n->as.funclit.body = parse_block(P);
+    return n;
+}
 
 static ast* parse_primary(parser* P) {
     if (P->tok.type == TK_INT) {
@@ -81,6 +114,10 @@ static ast* parse_primary(parser* P) {
         return n;
     }
 
+    if (accept(P, TK_FN)) {
+        return parse_fn_expr(P);
+    }
+
     if (accept(P, TK_LPAREN)) {
         ast* e = parse_expr(P);
         expect(P, TK_RPAREN, "expected ')'");
@@ -95,7 +132,7 @@ static ast* parse_primary(parser* P) {
 
         while (accept(P, TK_DOT)) {
             if (P->tok.type != TK_IDENT) {
-                if (!P->error) P->error = fmt_err(&P->tok, "expected identifier after '.'");
+                if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after '.'");
                 break;
             }
             char* part = cs_strndup2(P->tok.start, P->tok.len);
@@ -116,7 +153,7 @@ static ast* parse_primary(parser* P) {
         return n;
     }
 
-    if (!P->error) P->error = fmt_err(&P->tok, "expected expression");
+    if (!P->error) P->error = fmt_err(P, &P->tok, "expected expression");
     return NULL;
 }
 
@@ -147,6 +184,14 @@ static ast* parse_call(parser* P) {
             call->as.call.args = args;
             call->as.call.argc = cnt;
             expr = call;
+            continue;
+        }
+        if (accept(P, TK_LBRACKET)) {
+            ast* idx = node(P, N_INDEX);
+            idx->as.index.target = expr;
+            idx->as.index.index = parse_expr(P);
+            expect(P, TK_RBRACKET, "expected ']'");
+            expr = idx;
             continue;
         }
         break;
@@ -258,11 +303,23 @@ static void maybe_semi(parser* P) {
     (void)accept(P, TK_SEMI);
 }
 
+static ast* parse_lvalue(parser* P) {
+    ast* expr = parse_primary(P);
+    while (accept(P, TK_LBRACKET)) {
+        ast* idx = node(P, N_INDEX);
+        idx->as.index.target = expr;
+        idx->as.index.index = parse_expr(P);
+        expect(P, TK_RBRACKET, "expected ']'");
+        expr = idx;
+    }
+    return expr;
+}
+
 static ast* parse_fn(parser* P) {
     ast* n = node(P, N_FNDEF);
 
     if (P->tok.type != TK_IDENT) {
-        if (!P->error) P->error = fmt_err(&P->tok, "expected function name");
+        if (!P->error) P->error = fmt_err(P, &P->tok, "expected function name");
         return n;
     }
     n->as.fndef.name = cs_strndup2(P->tok.start, P->tok.len);
@@ -277,7 +334,7 @@ static ast* parse_fn(parser* P) {
         params = (char**)malloc(sizeof(char*) * cap);
         while (1) {
             if (P->tok.type != TK_IDENT) {
-                if (!P->error) P->error = fmt_err(&P->tok, "expected parameter name");
+                if (!P->error) P->error = fmt_err(P, &P->tok, "expected parameter name");
                 break;
             }
             if (cnt == cap) { cap *= 2; params = (char**)realloc(params, sizeof(char*) * cap); }
@@ -318,7 +375,7 @@ static ast* parse_stmt(parser* P) {
     if (accept(P, TK_LET)) {
         ast* n = node(P, N_LET);
         if (P->tok.type != TK_IDENT) {
-            if (!P->error) P->error = fmt_err(&P->tok, "expected name after let");
+            if (!P->error) P->error = fmt_err(P, &P->tok, "expected name after let");
             return n;
         }
         n->as.let_stmt.name = cs_strndup2(P->tok.start, P->tok.len);
@@ -366,36 +423,42 @@ static ast* parse_stmt(parser* P) {
         return n;
     }
 
-    // assignment: IDENT (= expr)
+    // assignment: lvalue (= expr) where lvalue is IDENT or INDEX
     if (P->tok.type == TK_IDENT) {
         // lookahead with a copy
         lexer saveL = P->L;
         token saveT = P->tok;
 
-        next(P);
-        while (accept(P, TK_DOT)) {
-            if (P->tok.type != TK_IDENT) break;
-            next(P);
-        }
-        if (P->tok.type == TK_ASSIGN) {
-            // rewind and parse as assignment by re-parsing ident dotted
-            P->L = saveL;
-            P->tok = saveT;
+        (void)parse_lvalue(P);
+        int is_assign = (P->tok.type == TK_ASSIGN);
 
-            ast* left = parse_primary(P); // must be N_IDENT
-            (void)accept(P, TK_ASSIGN);
-
-            ast* n = node(P, N_ASSIGN);
-            n->as.assign_stmt.name = left->as.ident.name;
-            left->as.ident.name = NULL; // transfer ownership
-            n->as.assign_stmt.value = parse_expr(P);
-            maybe_semi(P);
-            return n;
-        }
-
-        // not assignment -> rewind
+        // rewind and parse
         P->L = saveL;
         P->tok = saveT;
+
+        if (is_assign) {
+            ast* lv = parse_lvalue(P);
+            (void)accept(P, TK_ASSIGN);
+
+            ast* rhs = parse_expr(P);
+            maybe_semi(P);
+
+            if (lv && lv->type == N_IDENT) {
+                ast* n = node(P, N_ASSIGN);
+                n->as.assign_stmt.name = lv->as.ident.name;
+                lv->as.ident.name = NULL; // transfer ownership
+                n->as.assign_stmt.value = rhs;
+                return n;
+            }
+            if (lv && lv->type == N_INDEX) {
+                ast* n = node(P, N_SETINDEX);
+                n->as.setindex_stmt.target = lv->as.index.target;
+                n->as.setindex_stmt.index = lv->as.index.index;
+                n->as.setindex_stmt.value = rhs;
+                return n;
+            }
+            if (!P->error) P->error = fmt_err(P, &P->tok, "invalid assignment target");
+        }
     }
 
     // expression statement
@@ -420,4 +483,3 @@ ast* parse_program(parser* P) {
     b->as.block.count = cnt;
     return b;
 }
-

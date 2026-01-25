@@ -1,5 +1,5 @@
 CC      := gcc
-CFLAGS  := -std=c99 -Wall -Wextra -O2 -g
+CFLAGS  := -std=c99 -Wall -Wextra -O2 -g -D_POSIX_C_SOURCE=200809L
 AR      := ar
 ARFLAGS := rcs
 
@@ -34,4 +34,3 @@ $(BIN): $(CS_OBJS) $(CLI_OBJS)
 
 clean:
 	rm -rf $(OBJDIR) $(BINDIR)
-
