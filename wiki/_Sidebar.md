@@ -14,6 +14,7 @@
 * [Enums](Enums)
 * [Generators](Generators)
 * [Async & Await](Async-Await)
+* [Background Event Loop (Linux)](Event-Loop)
 * [Collections (list/map)](Collections)
 * [Strings & strbuf](Strings-and-Strbuf)
 * [Regex](Regex)

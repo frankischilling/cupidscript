@@ -1,4 +1,12 @@
-# Collections (list / map)
+# Collections (list / map / set)
+
+## Table of Contents
+
+- [Lists](#lists)
+- [Maps](#maps)
+- [Sets](#sets)
+- [Destructuring](#destructuring)
+- [Data Quality-of-Life Functions](#data-quality-of-life-functions)
 
 ## Lists
 
@@ -191,6 +199,40 @@ let pairs = items(m); // list of [key, value] lists
 ```
 
 ### Map Iteration
+
+## Sets
+
+Sets store unique values (based on `==`).
+
+### Create
+
+```c
+let s = set();
+let s2 = set([1, 2, 2, 3]); // duplicates ignored
+let s3 = set({a: 1, b: 2}); // keys from map
+```
+
+### Add / Has / Del
+
+```c
+set_add(s, 10);   // true if inserted
+set_has(s, 10);   // true if present
+set_del(s, 10);   // true if removed
+```
+
+### Values
+
+```c
+let xs = set_values(s); // list of values (order unspecified)
+```
+
+### Iteration
+
+```c
+for v in s {
+  print(v);
+}
+```
 
 Additional helpers for map iteration:
 

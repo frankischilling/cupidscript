@@ -109,7 +109,9 @@ const char* cs_type_name_impl(cs_type t) {
         case CS_T_STR:    return "string";
         case CS_T_LIST:   return "list";
         case CS_T_MAP:    return "map";
+        case CS_T_SET:    return "set";
         case CS_T_STRBUF: return "strbuf";
+        case CS_T_BYTES:  return "bytes";
         case CS_T_RANGE:  return "range";
         case CS_T_FUNC:   return "function";
         case CS_T_NATIVE: return "native";
@@ -140,6 +142,11 @@ uint32_t cs_value_hash(cs_value v) {
             cs_string* s = (cs_string*)v.as.p;
             if (!s || !s->data) return 0;
             return hash_bytes((const unsigned char*)s->data, s->len);
+        }
+        case CS_T_BYTES: {
+            cs_bytes_obj* b = (cs_bytes_obj*)v.as.p;
+            if (!b || !b->data) return 0;
+            return hash_bytes(b->data, b->len);
         }
         default: {
             uintptr_t p = (uintptr_t)v.as.p;
@@ -174,6 +181,13 @@ int cs_value_key_equals(cs_value a, cs_value b) {
             if (!sa || !sb) return sa == sb;
             if (sa->len != sb->len) return 0;
             return memcmp(sa->data, sb->data, sa->len) == 0;
+        }
+        case CS_T_BYTES: {
+            cs_bytes_obj* ba = (cs_bytes_obj*)a.as.p;
+            cs_bytes_obj* bb = (cs_bytes_obj*)b.as.p;
+            if (!ba || !bb) return ba == bb;
+            if (ba->len != bb->len) return 0;
+            return memcmp(ba->data, bb->data, ba->len) == 0;
         }
         default:
             return a.as.p == b.as.p;

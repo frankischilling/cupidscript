@@ -50,6 +50,13 @@ typedef struct cs_strbuf_obj {
     char* data;
 } cs_strbuf_obj;
 
+typedef struct cs_bytes_obj {
+    int ref;
+    size_t len;
+    size_t cap;
+    unsigned char* data;
+} cs_bytes_obj;
+
 typedef struct cs_range_obj {
     int ref;
     int64_t start;

@@ -1,5 +1,13 @@
 # Regex
 
+## Table of Contents
+
+- [Availability](#availability)
+- [Pattern Syntax](#pattern-syntax)
+- [Functions](#functions)
+- [Examples](#examples)
+- [Error Handling](#error-handling)
+
 CupidScript exposes regular expressions through the standard library. The engine is POSIX Extended Regular Expressions (ERE).
 
 ## Availability

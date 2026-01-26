@@ -1,5 +1,10 @@
 # Strings & strbuf
 
+## Table of Contents
+
+- [Strings](#strings)
+- [strbuf (string builder)](#strbuf-string-builder)
+
 ## Strings
 
 ### Literals

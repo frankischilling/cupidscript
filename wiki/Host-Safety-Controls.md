@@ -1,5 +1,17 @@
 # Host Safety Controls
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Instruction Limit](#instruction-limit)
+- [Timeout](#timeout)
+- [Interrupt](#interrupt)
+- [Checking Instruction Count](#checking-instruction-count)
+- [Best Practices](#best-practices)
+- [Implementation Details](#implementation-details)
+- [Testing](#testing)
+- [Error Handling](#error-handling)
+
 CupidScript provides comprehensive safety controls to protect the host application from malicious or buggy scripts that could hang the system.
 
 ## Overview

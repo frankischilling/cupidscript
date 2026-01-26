@@ -1,5 +1,33 @@
 # Standard Library
 
+## Table of Contents
+
+- [IO / Introspection](#io--introspection)
+- [Loading / Modules](#loading--modules)
+- [Error Handling](#error-handling)
+- [Constructors](#constructors)
+- [Length](#length)
+- [Iteration](#iteration)
+- [List Ops](#list-ops)
+- [Map Ops](#map-ops)
+- [Set Ops](#set-ops)
+- [Data Quality-of-Life](#data-quality-of-life)
+- [String Ops](#string-ops)
+- [List Utilities](#list-utilities)
+- [Path Ops](#path-ops)
+- [Date / Time](#date--time)
+- [Filesystem](#filesystem)
+- [Formatting](#formatting)
+- [JSON](#json)
+- [Time](#time)
+- [Promises](#promises)
+- [Math Functions](#math-functions)
+- [Math Constants](#math-constants)
+- [Conversion](#conversion)
+- [Memory Management](#memory-management)
+- [Safety Controls](#safety-controls)
+- [Network I/O](#network-io)
+
 These functions are registered by `cs_register_stdlib(vm)`.
 
 ## IO / Introspection
@@ -11,7 +39,7 @@ Prints values separated by spaces and ends with newline.
 ### `typeof(value) -> string`
 
 Returns one of:
-`"nil" "bool" "int" "float" "string" "list" "map" "strbuf" "range" "function" "native" "promise"`
+`"nil" "bool" "int" "float" "string" "bytes" "list" "map" "set" "strbuf" "range" "function" "native" "promise"`
 
 ### Type Predicates
 
@@ -22,6 +50,8 @@ Boolean type-checking functions:
 * `is_int(value) -> bool`
 * `is_float(value) -> bool`
 * `is_string(value) -> bool`
+* `is_set(value) -> bool`
+* `is_bytes(value) -> bool`
 * `is_list(value) -> bool`
 * `is_map(value) -> bool`
 * `is_function(value) -> bool`
@@ -43,6 +73,28 @@ Returns environment variable value or `nil` if missing.
 
 * If `cond` is falsy → runtime error
 * Optional second argument string overrides error message
+
+### `subprocess(cmd: string, args?: list) -> map`
+
+Runs an external command and captures combined stdout/stderr.
+
+Returns a map:
+
+* `code` - exit code (int)
+* `out` - captured output (string)
+
+Notes:
+
+* `args` is an optional list of arguments.
+* Output is captured as raw bytes into a string.
+
+Example:
+
+```c
+let r = subprocess("echo", ["hello"]);
+print(r.code);       // 0
+print(r.out);        // "hello\n"
+```
 
 ## Loading / Modules
 
@@ -114,7 +166,28 @@ Global map of common error codes (strings), intended to be used with `error(msg,
 
 ### `map() -> map`
 
+### `set()` / `set(list|map|set)`
+
+Creates a set (unique collection of values).
+
+* no args → empty set
+* list → adds each element (duplicates ignored)
+* map → adds each key
+* set → copies values
+
 ### `strbuf() -> strbuf`
+
+### `bytes()` / `bytes(x)`
+
+Creates a bytes buffer.
+
+Accepted inputs:
+
+* no args → empty bytes
+* int → length (zero-filled)
+* string → raw byte copy of the string
+* list of ints 0..255 → bytes filled from list
+* bytes → returns a copy
 
 ## Length
 
@@ -123,8 +196,10 @@ Global map of common error codes (strings), intended to be used with `error(msg,
 Works for:
 
 * string: number of bytes
+* bytes: byte length
 * list: element count
 * map: entry count
+* set: entry count
 * strbuf: byte length
   Else returns 0.
 
@@ -276,6 +351,24 @@ Returns a list of all values in the map.
 
 Returns a list of `[key, value]` pairs.
 
+## Set Ops
+
+### `set_add(set, value) -> bool`
+
+Adds a value. Returns `true` if inserted, `false` if it was already present.
+
+### `set_has(set, value) -> bool`
+
+Returns `true` if value exists.
+
+### `set_del(set, value) -> bool`
+
+Removes a value. Returns `true` if removed.
+
+### `set_values(set) -> list`
+
+Returns a list of values in the set (iteration order is unspecified).
+
 ### `map_values(map) -> list[value]`
 
 Alias for `values()`. Returns all values as a list for convenient iteration.
@@ -288,13 +381,14 @@ Returns a shallow copy:
 
 * Lists: creates new list with same elements
 * Maps: creates new map with same key-value pairs
+* Sets: creates new set with same values
 * Other types: returns the value as-is
 
 ### `deepcopy(x) -> value`
 
 Returns a deep copy with cycle detection:
 
-* Lists and maps are recursively copied
+* Lists, maps, and sets are recursively copied
 * Handles self-referential structures
 * Other types: returns the value as-is
 
@@ -312,6 +406,7 @@ Checks if item exists:
 
 * Lists: checks for element
 * Maps: checks for key
+* Sets: checks for value
 * Strings: checks for substring
 
 Example:
@@ -329,6 +424,7 @@ let rev = reversed([1, 2, 3]);  // original unchanged
 
 print(contains([1, 2, 3], 2));        // true
 print(contains({"a": 1}, "a"));       // true
+print(contains(set([1, 2]), 2));      // true
 print(contains("hello", "ell"));      // true
 ```
 
@@ -564,9 +660,17 @@ Returns extension without dot, or `""` if none.
 
 Reads a file and returns its contents as a string. Returns `nil` if the file can't be read.
 
-### `write_file(path: string, data: string) -> bool`
+### `read_file_bytes(path: string) -> bytes | nil`
+
+Reads a file and returns its raw contents as bytes. Returns `nil` if the file can't be read.
+
+### `write_file(path: string, data: string|bytes) -> bool`
 
 Writes `data` to `path` (overwrites). Returns `true` on success.
+
+### `write_file_bytes(path: string, data: bytes) -> bool`
+
+Writes raw bytes to `path` (overwrites). Returns `true` on success.
 
 ### `exists(path: string) -> bool`
 
@@ -668,6 +772,16 @@ await sleep(10);
 
 If `ms <= 0`, the promise resolves immediately.
 
+### Background Event Loop (Linux only)
+
+`event_loop_start()` -> `bool`  — Start the background event loop (returns `true` on success).
+
+`event_loop_stop()` -> `bool`   — Stop and join the background event loop.
+
+`event_loop_running()` -> `bool` — Check if the background event loop is running.
+
+Note: This is a Linux-only feature that runs the VM scheduler and pending I/O on a separate thread so the main thread can block on `await` while the event loop makes progress.
+
 ## Promises
 
 ### `promise() -> promise`
@@ -720,6 +834,40 @@ Returns square root. Accepts int or float, always returns float.
 
 Returns `base` raised to `exp` power. Accepts int or float, returns float.
 
+### `sin(x) -> float`
+
+Returns sine of `x` (radians). Accepts int or float.
+
+### `cos(x) -> float`
+
+Returns cosine of `x` (radians). Accepts int or float.
+
+### `tan(x) -> float`
+
+Returns tangent of `x` (radians). Accepts int or float.
+
+### `log(x) -> float`
+
+Returns natural logarithm of `x` (base $e$). Accepts int or float.
+
+### `exp(x) -> float`
+
+Returns $e^x$. Accepts int or float.
+
+### `random() -> float`
+
+Returns a pseudo-random float in the range $[0, 1)$.
+
+## Math Constants
+
+### `PI`
+
+The constant $\pi$.
+
+### `E`
+
+The constant $e$.
+
 Example:
 
 ```c
@@ -727,6 +875,12 @@ let x = sqrt(16);     // 4.0
 let y = pow(2, 8);    // 256.0
 let z = abs(-42);     // 42
 let m = min(3, 7, 2); // 2
+let s = sin(PI / 2);  // ~1.0
+let c = cos(0);       // 1.0
+let t = tan(0);       // 0.0
+let l = log(E);       // ~1.0
+let ex = exp(1);      // ~2.71828
+let r = random();     // [0, 1)
 ```
 
 ## Conversion

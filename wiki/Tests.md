@@ -1,5 +1,13 @@
 # Tests
 
+## Table of Contents
+
+- [Running Tests](#running-tests)
+- [Writing Script Tests](#writing-script-tests)
+- [Negative Tests (Expected Failures)](#negative-tests-expected-failures)
+- [Helper Files](#helper-files)
+- [C API Tests](#c-api-tests)
+
 CupidScript tests are plain `.cs` scripts under `tests/` plus a native C test binary.
 
 ## Running Tests

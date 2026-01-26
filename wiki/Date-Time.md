@@ -1,5 +1,11 @@
 # Date & Time
 
+## Table of Contents
+
+- [Unix Time](#unix-time)
+- [Date/Time Maps](#datetime-maps)
+- [Example](#example)
+
 CupidScript provides simple date/time helpers in the standard library.
 
 ## Unix Time

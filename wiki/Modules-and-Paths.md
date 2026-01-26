@@ -1,5 +1,13 @@
 # Modules (load/require) & Paths
 
+## Table of Contents
+
+- [Current Directory Stack](#current-directory-stack)
+- [`load(path)`](#loadpath)
+- [`require(path)`](#requirepath)
+- [`require_optional(path)`](#require_optionalpath)
+- [Path Helpers](#path-helpers)
+
 CupidScript implements basic file execution helpers in the stdlib.
 
 ## Current Directory Stack

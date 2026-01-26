@@ -1,5 +1,13 @@
 # Types & Values
 
+## Table of Contents
+
+- [Built-in Types](#built-in-types)
+- [Mutability](#mutability)
+- [Truthiness Rules](#truthiness-rules)
+- [Equality](#equality)
+- [Comparisons](#comparisons)
+
 CupidScript is dynamically typed.
 
 ## Built-in Types
@@ -36,6 +44,14 @@ Heap-allocated refcounted string (`cs_string`).
 
 * `+` concatenates if either operand is a string
 
+### `bytes`
+
+Mutable byte buffer for binary data.
+
+* Indexing: `b[i]` where `i` is int (0..len-1) returns an int 0..255
+* Assignment: `b[i] = 255` writes a byte
+* Out-of-range or negative index returns `nil`
+
 ### `list`
 
 Dynamic array of `cs_value`.
@@ -58,6 +74,14 @@ Key equality uses the same rules as `==`:
 * `string` compares by content
 * Other heap objects compare by identity (same object)
 
+### `set`
+
+Unique collection of values (internally a hash set).
+
+* Values are unique by `==`
+* Iterable with `for x in set { ... }`
+* Order is not guaranteed
+
 ### `strbuf`
 
 Mutable string builder object.
@@ -74,7 +98,8 @@ Promise values represent pending asynchronous results:
 
 ## Mutability
 
-* Lists and maps are mutable.
+* Lists, maps, and sets are mutable.
+* Bytes buffers are mutable.
 * Strings are immutable.
 * `const` creates an immutable binding (reassignment is not allowed), but the value itself may still be mutable (e.g., list/map contents).
 
@@ -101,8 +126,8 @@ That means `0` is truthy (because it's an `int`, not `nil`/`bool`).
 
 * If types differ → not equal
 * `nil` equals `nil`
-* `bool`, `int`, `string` compare by value
-* Other heap objects compare by pointer identity (same object)
+* `bool`, `int`, `string`, `bytes` compare by value
+* Other heap objects (including `list`, `map`, `set`, `strbuf`) compare by pointer identity (same object)
 
 ## Comparisons
 

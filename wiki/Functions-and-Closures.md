@@ -1,5 +1,15 @@
 # Functions & Closures
 
+## Table of Contents
+
+- [Named Functions: `fn name(...) { ... }`](#named-functions-fn-name)
+- [Function Literals: `fn (...) { ... }`](#function-literals-fn)
+- [Calls](#calls)
+- [Default Parameters](#default-parameters)
+- [Arrow Functions](#arrow-functions)
+- [Rest Parameters](#rest-parameters)
+- [Closures Example](#closures-example)
+
 CupidScript supports **named functions** and **function literals**.
 
 ## Named Functions: `fn name(...) { ... }`

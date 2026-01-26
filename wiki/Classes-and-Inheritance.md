@@ -1,5 +1,12 @@
 # Classes & Inheritance
 
+## Table of Contents
+
+- [Defining Classes](#defining-classes)
+- [Creating Instances](#creating-instances)
+- [Inheritance](#inheritance)
+- [Method Calls](#method-calls)
+
 CupidScript supports classes with constructors, methods, and single inheritance.
 
 ## Defining Classes

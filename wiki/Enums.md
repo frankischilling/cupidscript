@@ -1,5 +1,11 @@
 # Enums
 
+## Table of Contents
+
+- [Syntax](#syntax)
+- [Rules](#rules)
+- [Notes](#notes)
+
 Enums define named integer constants. Enum members are stored in a map, so values are accessed using dot syntax.
 
 ## Syntax

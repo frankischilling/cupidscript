@@ -1,5 +1,22 @@
 # Control Flow
 
+## Table of Contents
+
+- [Blocks](#blocks)
+- [`if` / `else`](#if--else)
+- [`while`](#while)
+- [`for...in`](#forin)
+- [C-Style `for` Loops](#c-style-for-loops)
+- [Range Operator](#range-operator)
+- [`return`](#return)
+- [`break` / `continue`](#break--continue)
+- [`switch`](#switch)
+- [`defer`](#defer)
+- [`match` Expression](#match-expression)
+- [`try` / `catch` / `finally`](#try--catch--finally)
+- [Ternary Expression](#ternary-expression)
+- [Exception Handling](#exception-handling)
+
 ## Blocks
 
 Blocks are `{ ... }` and appear in:
@@ -22,7 +39,7 @@ if (cond) {
 }
 ```
 
-Notes for this:
+Notes:
 
 * Parentheses are required: `if ( ... )`
 * `else` block is optional
@@ -361,4 +378,3 @@ try {
   print("Error:", e);
 }
 ```
-

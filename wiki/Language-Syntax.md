@@ -1,5 +1,29 @@
 # Language Syntax
 
+## Table of Contents
+
+- [Comments](#comments)
+- [Tokens](#tokens)
+- [Functions](#functions)
+- [Arrow Functions](#arrow-functions)
+- [Spread & Rest](#spread--rest)
+- [Pipe Operator](#pipe-operator)
+- [Classes](#classes)
+- [Structs](#structs)
+- [Enums](#enums)
+- [Generators (`yield`)](#generators-yield)
+- [Async / Await](#async--await)
+- [Operators & Punctuation](#operators--punctuation)
+- [Precedence (high to low)](#precedence-high-to-low)
+- [`switch` Statement](#switch-statement)
+- [`defer` Statement](#defer-statement)
+- [`match` Expression](#match-expression)
+- [`try` / `catch` / `finally` Statements](#try--catch--finally-statements)
+- [`export` Statements](#export-statements)
+- [`import` Statements](#import-statements)
+- [`const` Bindings](#const-bindings)
+- [Destructuring `let`](#destructuring-let)
+
 CupidScript uses a C-like surface syntax.
 
 ## Comments

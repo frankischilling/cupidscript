@@ -1,5 +1,14 @@
 # Errors & Debugging
 
+## Table of Contents
+
+- [Parse Errors](#parse-errors)
+- [Runtime Errors](#runtime-errors)
+- [Exception Handling](#exception-handling)
+- [Error Objects](#error-objects)
+- [Stack Traces](#stack-traces)
+- [Tips](#tips)
+
 CupidScript has two major error classes:
 
 * Parse errors (lexer/parser)

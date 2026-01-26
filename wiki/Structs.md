@@ -1,5 +1,13 @@
 # Structs
 
+## Table of Contents
+
+- [Syntax](#syntax)
+- [Fields and Defaults](#fields-and-defaults)
+- [Construction Rules](#construction-rules)
+- [Field Access](#field-access)
+- [Notes](#notes)
+
 Structs are lightweight, immutable-by-definition *types* with fixed fields and positional construction. They are ideal for small data carriers when you don’t need methods or inheritance.
 
 ## Syntax

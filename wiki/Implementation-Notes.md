@@ -1,5 +1,13 @@
 # Implementation Notes (Lexer / Parser / VM)
 
+## Table of Contents
+
+- [Lexer](#lexer)
+- [Parser](#parser)
+- [VM / Runtime](#vm--runtime)
+- [Safety Controls](#safety-controls)
+- [Garbage Collection](#garbage-collection)
+
 This page is for contributors hacking on the language runtime.
 
 ## Lexer
@@ -91,7 +99,7 @@ Semicolons are optional in many places; `maybe_semi()` consumes an optional `;`.
 `cs_value` carries a `cs_type` tag and either:
 
 * immediate (`bool`, `int`, `float`)
-* pointer to refcounted heap objects (`string`, `list`, `map`, `strbuf`, `function`, `native`)
+* pointer to refcounted heap objects (`string`, `list`, `map`, `set`, `strbuf`, `function`, `native`)
 
 Note: `float` is stored as a 64-bit `double` in the value union.
 

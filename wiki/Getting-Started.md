@@ -1,5 +1,12 @@
 # Getting Started
 
+## Table of Contents
+
+- [Running Scripts](#running-scripts)
+- [Tests](#tests)
+- [Hello World](#hello-world)
+- [Common Patterns](#common-patterns)
+
 This wiki describes the *language behavior* implemented by the current lexer/parser/VM/stdlib.
 
 ## Running Scripts
@@ -100,6 +107,14 @@ mset(m, "name", "Frank");
 print(mget(m, "name"));
 print(mhas(m, "name"));
 print(keys(m));
+```
+
+### Subprocess
+
+```c
+let r = subprocess("echo", ["hello"]);
+print("exit:", r.code);
+print("out:", r.out);
 ```
 
 ### While loops

@@ -1,5 +1,11 @@
 ﻿# CupidScript Wiki
 
+## Table of Contents
+
+- [Quick Example](#quick-example)
+- [Language at a Glance](#language-at-a-glance)
+- [Wiki Pages](#wiki-pages)
+
 CupidScript is a small embeddable scripting language with:
 
 * A C lexer + recursive-descent parser

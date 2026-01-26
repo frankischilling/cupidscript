@@ -1,5 +1,11 @@
 # Generators
 
+## Table of Contents
+
+- [Syntax](#syntax)
+- [Semantics](#semantics)
+- [Errors](#errors)
+
 Generators are functions that use `yield` to produce a sequence of values. Calling a generator executes the function immediately and returns a list of the yielded values.
 
 ## Syntax
