@@ -42,6 +42,9 @@ typedef enum {
     TK_CATCH,
     TK_FINALLY,
     TK_EXPORT,
+    TK_CLASS,
+    TK_SELF,
+    TK_SUPER,
     TK_TRUE,
     TK_FALSE,
     TK_NIL,
@@ -57,6 +60,7 @@ typedef enum {
     TK_QMARK,
     TK_QQ,          // ??
     TK_QDOT,        // ?.
+    TK_DOTDOTDOT,   // ...
 
     // operators
     TK_ASSIGN,     // =
@@ -67,6 +71,9 @@ typedef enum {
     TK_LT, TK_LE,
     TK_GT, TK_GE,
     TK_ANDAND, TK_OROR,
+    TK_ARROW,      // =>
+    TK_PIPE,       // |>
+    TK_PLACEHOLDER, // _
     TK_RANGE,      // ..
     TK_RANGE_INC   // ..=
 } token_type;

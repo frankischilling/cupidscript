@@ -36,7 +36,61 @@ f();
 f(1, 2, 3);
 ```
 
-Argument count must match exactly for user-defined functions (runtime error on mismatch).
+Argument count must be between the required and total parameter counts. Missing arguments use default values when provided. Too few or too many arguments is a runtime error.
+
+## Default Parameters
+
+Default values are allowed in function definitions and function literals:
+
+```c
+fn greet(name, greeting = "Hello") {
+  return greeting + ", " + name + "!";
+}
+
+let add = fn(a, b = 10) { return a + b; };
+```
+
+Rules:
+
+* Required parameters must come before default parameters.
+* Defaults are evaluated at call time in the callee’s closure.
+* Defaults can reference earlier parameters.
+* Passing `nil` explicitly uses `nil` (it does not trigger the default).
+
+## Arrow Functions
+
+Arrow functions provide a concise syntax with optional implicit return.
+
+```c
+let add = fn(a, b) => a + b;
+let inc = fn(x) => x + 1;
+let block = fn(x) => { return x * 2; };
+```
+
+Rules:
+
+* `fn(args) => expr` returns the expression value.
+* `fn(args) => { ... }` uses a block body; explicit `return` is required.
+* Named functions can also use `=>`.
+
+## Rest Parameters
+
+Rest parameters collect extra arguments into a list.
+
+```c
+fn log_all(prefix, ...items) {
+  for item in items {
+    print(prefix, item);
+  }
+}
+
+log_all(">", "a", "b", "c");
+```
+
+Rules:
+
+* Rest parameter must be the last parameter.
+* `items` is a list of any remaining arguments (possibly empty).
 
 ## Closures Example
 

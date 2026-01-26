@@ -127,14 +127,14 @@ Works for:
 
 ## Iteration
 
-### `range(end)` / `range(start, end)` / `range(start, end, step) -> list[int]`
+### `range(end)` / `range(start, end)` / `range(start, end, step) -> range`
 
-Generates a list of integers:
+Returns a lazy range object (iterable) without allocating a list:
 
-* `range(5)` → `[0, 1, 2, 3, 4]`
-* `range(2, 7)` → `[2, 3, 4, 5, 6]`
-* `range(0, 10, 2)` → `[0, 2, 4, 6, 8]`
-* `range(10, 0, -2)` → `[10, 8, 6, 4, 2]`
+* `range(5)` → yields `0, 1, 2, 3, 4`
+* `range(2, 7)` → yields `2, 3, 4, 5, 6`
+* `range(0, 10, 2)` → yields `0, 2, 4, 6, 8`
+* `range(10, 0, -2)` → yields `10, 8, 6, 4, 2`
 
 Default step is `1`. Step cannot be `0`.
 
@@ -152,6 +152,33 @@ for i in range(10) {
 
 ### `pop(list) -> value | nil`
 
+### `extend(list, other_list)`
+
+Appends all elements from `other_list` onto `list` (in-place).
+
+### `index_of(list, value) -> int`
+
+Returns the first index of `value`, or `-1` if not found.
+
+### `sort(list, [cmp], [algo])`
+
+Sorts the list in-place.
+
+* Default sort supports numbers, strings, bools, and nil (matching types only).
+* Optional `cmp(a, b)` should return negative/zero/positive like C's comparator.
+* Optional `algo` selects the algorithm: `"insertion"`, `"quick"`, `"merge"`.
+
+Examples:
+
+```c
+sort(xs); // insertion sort (default)
+sort(xs, "quick");
+sort(xs, "merge");
+
+fn desc(a, b) { return b - a; }
+sort(xs, desc, "quick");
+```
+
 ### `insert(list, index: int, value)`
 
 Inserts `value` at position `index`, shifting existing elements.
@@ -166,17 +193,17 @@ Returns a new list containing `length` elements starting at `start`.
 
 ## Map Ops
 
-### `mget(map, key: string) -> value | nil`
+### `mget(map, key: value) -> value | nil`
 
-### `mset(map, key: string, value)`
+### `mset(map, key: value, value)`
 
-### `mhas(map, key: string) -> bool`
+### `mhas(map, key: value) -> bool`
 
-### `mdel(map, key: string)`
+### `mdel(map, key: value)`
 
 Deletes a key from the map.
 
-### `keys(map) -> list[string]`
+### `keys(map) -> list[value]`
 
 ### `values(map) -> list[value]`
 
@@ -270,37 +297,41 @@ Joins list elements into a string with the given separator.
 
 ### String Ergonomics
 
-#### `str_trim(s: string) -> string`
+#### `str_trim(s: string) -> string` / `trim(s: string) -> string`
 
 Removes leading and trailing whitespace.
 
-#### `str_ltrim(s: string) -> string`
+#### `str_ltrim(s: string) -> string` / `ltrim(s: string) -> string`
 
 Removes leading whitespace only.
 
-#### `str_rtrim(s: string) -> string`
+#### `str_rtrim(s: string) -> string` / `rtrim(s: string) -> string`
 
 Removes trailing whitespace only.
 
-#### `str_lower(s: string) -> string`
+#### `str_lower(s: string) -> string` / `lower(s: string) -> string`
 
 Converts string to lowercase (ASCII only).
 
-#### `str_upper(s: string) -> string`
+#### `str_upper(s: string) -> string` / `upper(s: string) -> string`
 
 Converts string to uppercase (ASCII only).
 
-#### `str_startswith(s: string, prefix: string) -> bool`
+#### `str_startswith(s: string, prefix: string) -> bool` / `starts_with(s, prefix) -> bool`
 
 Returns `true` if string starts with the given prefix.
 
-#### `str_endswith(s: string, suffix: string) -> bool`
+#### `str_endswith(s: string, suffix: string) -> bool` / `ends_with(s, suffix) -> bool`
 
 Returns `true` if string ends with the given suffix.
 
 #### `str_repeat(s: string, count: int) -> string`
 
 Returns a new string with `s` repeated `count` times.
+
+#### `split_lines(s: string) -> list[string]`
+
+Splits the string on `\n` or `\r\n`. An empty trailing line is preserved.
 
 Example:
 
@@ -312,6 +343,7 @@ print(str_upper("hello"));       // "HELLO"
 print(str_startswith("test", "te"));  // true
 print(str_endswith("test", "st"));    // true
 print(str_repeat("ab", 3));      // "ababab"
+print(split_lines("a\n b\r\n")); // ["a", " b", ""]
 ```
 
 ## Path Ops
@@ -336,6 +368,52 @@ Returns last path component.
 
 Returns extension without dot, or `""` if none.
 
+## Filesystem
+
+### `read_file(path: string) -> string | nil`
+
+Reads a file and returns its contents as a string. Returns `nil` if the file can't be read.
+
+### `write_file(path: string, data: string) -> bool`
+
+Writes `data` to `path` (overwrites). Returns `true` on success.
+
+### `exists(path: string) -> bool`
+
+Returns `true` if the path exists.
+
+### `is_dir(path: string) -> bool`
+
+Returns `true` if the path exists and is a directory.
+
+### `is_file(path: string) -> bool`
+
+Returns `true` if the path exists and is a regular file.
+
+### `list_dir(path: string) -> list | nil`
+
+Returns a list of entry names (not full paths). Returns `nil` if the directory can't be opened.
+
+### `mkdir(path: string) -> bool`
+
+Creates a directory. Returns `true` on success (or if it already exists).
+
+### `rm(path: string) -> bool`
+
+Removes a file or an empty directory. Returns `true` on success.
+
+### `rename(from: string, to: string) -> bool`
+
+Renames or moves a file or directory. Returns `true` on success.
+
+### `cwd() -> string`
+
+Returns the VM's current working directory (used for resolving relative paths).
+
+### `chdir(path: string) -> bool`
+
+Sets the VM's current working directory for future relative paths. Returns `true` on success.
+
 ## Formatting
 
 ### `fmt(format_string, ...args) -> string`
@@ -353,6 +431,32 @@ Example:
 
 ```c
 print(fmt("x=%d ok=%b name=%s", 10, true, "frank"));
+```
+
+## JSON
+
+### `json_parse(text: string) -> value`
+
+Parses JSON into CupidScript values:
+
+* `null` → `nil`
+* `true/false` → `bool`
+* numbers → `int` or `float`
+* strings → `string`
+* arrays → `list`
+* objects → `map`
+
+### `json_stringify(value) -> string`
+
+Serializes a value to JSON. Supports `nil`, `bool`, `int`, `float`, `string`, `list`, `map`.
+
+Example:
+
+```c
+let obj = {"name": "frank", "age": 30, "tags": ["a", "b"]};
+let s = json_stringify(obj);
+let back = json_parse(s);
+print(back.name);
 ```
 
 ## Time

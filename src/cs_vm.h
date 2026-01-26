@@ -22,7 +22,9 @@ struct cs_func {
     int def_line;
     int def_col;
     char** params;
+    ast** defaults;         // default expressions (NULL if no default)
     size_t param_count;
+    char* rest_param;        // optional rest parameter name
     ast* body;
     cs_env* closure;
 };

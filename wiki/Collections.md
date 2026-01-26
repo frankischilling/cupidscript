@@ -10,6 +10,15 @@ let ys = [];           // empty list literal
 let zs = [1, 2, 3];    // list literal with elements
 ```
 
+### Spread
+
+Use `...` to expand a list literal:
+
+```c
+let a = [1, 2, 3];
+let b = [0, ...a, 4];  // [0, 1, 2, 3, 4]
+```
+
 ### Push / Pop
 
 ```c
@@ -63,9 +72,38 @@ let sub = slice(xs, start, length);
 
 Returns a new list with elements from `start` (inclusive) for `length` elements.
 
+### Extend
+
+```c
+extend(xs, ys); // appends all elements of ys into xs
+```
+
+### Index Of
+
+```c
+let i = index_of(xs, 123); // returns index or -1
+```
+
+### Sort
+
+```c
+sort(xs); // in-place, default comparison (insertion)
+sort(xs, "quick");
+sort(xs, "merge");
+
+fn desc(a, b) { return b - a; }
+sort(xs, desc, "quick"); // custom comparator + algorithm
+```
+
 ## Maps
 
-Maps use **string keys**.
+Maps accept **any value** as a key.
+
+Key equality follows `==`:
+
+* `int` and `float` compare by numeric value (so `1` equals `1.0`)
+* `string` compares by content
+* Lists/maps/functions compare by identity (same object)
 
 ### Create
 
@@ -73,13 +111,46 @@ Maps use **string keys**.
 let m = map();
 let m2 = {};                          // empty map literal
 let m3 = {"name": "Frank", "age": 30}; // map literal
+let m4 = {1: "one", true: "yes", nil: "none"};
+```
+
+### Spread
+
+Use `...` to expand a map literal (later keys override earlier keys):
+
+```c
+let defaults = {theme: "dark", size: 12};
+let config = {...defaults, size: 14};
 ```
 
 ### Set / Get
 
+## Destructuring
+
+Lists and maps can be destructured in `let` declarations:
+
+```c
+let [a, b] = [1, 2];
+let {x, y} = {"x": 10, "y": 20};
+let {key: alias} = {"key": "value"};
+```
+
+Rest patterns capture remaining elements:
+
+```c
+let [a, b, ...rest] = [1, 2, 3, 4];
+let {x, ...other} = {x: 10, y: 20, z: 30};
+```
+
+Missing entries produce `nil`. Use `_` to ignore a binding.
+
 ```c
 mset(m, "name", "Frank");
 print(mget(m, "name"));
+
+// non-string keys
+mset(m, 42, "answer");
+print(mget(m, 42));
 ```
 
 * Missing key returns `nil`
@@ -88,12 +159,13 @@ print(mget(m, "name"));
 
 ```c
 mhas(m, "name") // bool
+mhas(m, 42)      // bool
 ```
 
 ### Keys
 
 ```c
-let ks = keys(m); // list of strings
+let ks = keys(m); // list of keys (any value)
 ```
 
 ### Values
@@ -167,10 +239,11 @@ print(contains("hello world", "world")); // true
 mdel(m, "key"); // removes the key
 ```
 
-### Indexing with strings
+### Indexing with keys
 
 ```c
 m["name"]
+m[42]
 ```
 
 ### Field access on maps

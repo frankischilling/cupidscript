@@ -57,6 +57,7 @@ static int expect(parser* P, token_type t, const char* msg) {
 static ast* parse_stmt(parser* P);
 static ast* parse_block(parser* P);
 static ast* parse_expr(parser* P);
+static ast* parse_fn(parser* P);
 static ast* parse_interpolated_string(parser* P);
 static ast* parse_match_expr(parser* P);
 static ast* parse_list_pattern(parser* P);
@@ -140,17 +141,51 @@ static ast* parse_fn_expr(parser* P) {
 
     size_t cap = 4, cnt = 0;
     char** params = NULL;
+    ast** defaults = NULL;
+    int seen_default = 0;
+    char* rest_param = NULL;
 
     if (P->tok.type != TK_RPAREN) {
         params = (char**)malloc(sizeof(char*) * cap);
+        defaults = (ast**)calloc(cap, sizeof(ast*));
         while (1) {
+            if (accept(P, TK_DOTDOTDOT)) {
+                if (rest_param) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "duplicate rest parameter");
+                    break;
+                }
+                if (P->tok.type != TK_IDENT) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "expected rest parameter name");
+                    break;
+                }
+                rest_param = cs_strndup2(P->tok.start, P->tok.len);
+                next(P);
+                if (accept(P, TK_COMMA)) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "rest parameter must be last");
+                }
+                break;
+            }
             if (P->tok.type != TK_IDENT) {
                 if (!P->error) P->error = fmt_err(P, &P->tok, "expected parameter name");
                 break;
             }
-            if (cnt == cap) { cap *= 2; params = (char**)realloc(params, sizeof(char*) * cap); }
-            params[cnt++] = cs_strndup2(P->tok.start, P->tok.len);
+            if (cnt == cap) {
+                cap *= 2;
+                params = (char**)realloc(params, sizeof(char*) * cap);
+                defaults = (ast**)realloc(defaults, sizeof(ast*) * cap);
+                for (size_t i = cnt; i < cap; i++) defaults[i] = NULL;
+            }
+            params[cnt] = cs_strndup2(P->tok.start, P->tok.len);
             next(P);
+
+            if (accept(P, TK_ASSIGN)) {
+                defaults[cnt] = parse_expr(P);
+                seen_default = 1;
+            } else if (seen_default) {
+                if (!P->error) P->error = fmt_err(P, &P->tok, "non-default parameter after default parameter");
+                break;
+            }
+            cnt++;
 
             if (accept(P, TK_COMMA)) continue;
             break;
@@ -159,8 +194,26 @@ static ast* parse_fn_expr(parser* P) {
     expect(P, TK_RPAREN, "expected ')' after parameters");
 
     n->as.funclit.params = params;
+    n->as.funclit.defaults = defaults;
     n->as.funclit.param_count = cnt;
-    n->as.funclit.body = parse_block(P);
+    n->as.funclit.rest_param = rest_param;
+    if (accept(P, TK_ARROW)) {
+        if (P->tok.type == TK_LBRACE) {
+            n->as.funclit.body = parse_block(P);
+        } else {
+            ast* expr = parse_expr(P);
+            ast* block = node(P, N_BLOCK);
+            ast** items = (ast**)malloc(sizeof(ast*));
+            ast* ret = node(P, N_RETURN);
+            ret->as.ret_stmt.value = expr;
+            items[0] = ret;
+            block->as.block.items = items;
+            block->as.block.count = 1;
+            n->as.funclit.body = block;
+        }
+    } else {
+        n->as.funclit.body = parse_block(P);
+    }
     return n;
 }
 
@@ -217,7 +270,13 @@ static ast* parse_primary(parser* P) {
             items = (ast**)malloc(sizeof(ast*) * cap);
             while (1) {
                 if (cnt == cap) { cap *= 2; items = (ast**)realloc(items, sizeof(ast*) * cap); }
-                items[cnt++] = parse_expr(P);
+                if (accept(P, TK_DOTDOTDOT)) {
+                    ast* sp = node(P, N_SPREAD);
+                    sp->as.spread.expr = parse_expr(P);
+                    items[cnt++] = sp;
+                } else {
+                    items[cnt++] = parse_expr(P);
+                }
                 if (accept(P, TK_COMMA)) {
                     if (P->tok.type == TK_RBRACKET) break;
                     continue;
@@ -245,14 +304,21 @@ static ast* parse_primary(parser* P) {
                     keys = (ast**)realloc(keys, sizeof(ast*) * cap);
                     vals = (ast**)realloc(vals, sizeof(ast*) * cap);
                 }
-                keys[cnt] = parse_expr(P);
-                if (keys[cnt] && keys[cnt]->type == N_IDENT && P->tok.type == TK_COLON) {
-                    ast* key_lit = make_quoted_str_lit(P, keys[cnt]->as.ident.name);
-                    ast_free(keys[cnt]);
-                    keys[cnt] = key_lit;
+                if (accept(P, TK_DOTDOTDOT)) {
+                    ast* sp = node(P, N_SPREAD);
+                    sp->as.spread.expr = parse_expr(P);
+                    keys[cnt] = sp;
+                    vals[cnt] = NULL;
+                } else {
+                    keys[cnt] = parse_expr(P);
+                    if (keys[cnt] && keys[cnt]->type == N_IDENT && P->tok.type == TK_COLON) {
+                        ast* key_lit = make_quoted_str_lit(P, keys[cnt]->as.ident.name);
+                        ast_free(keys[cnt]);
+                        keys[cnt] = key_lit;
+                    }
+                    expect(P, TK_COLON, "expected ':' in map literal");
+                    vals[cnt] = parse_expr(P);
                 }
-                expect(P, TK_COLON, "expected ':' in map literal");
-                vals[cnt] = parse_expr(P);
                 cnt++;
                 if (accept(P, TK_COMMA)) {
                     if (P->tok.type == TK_RBRACE) break;
@@ -278,7 +344,13 @@ static ast* parse_primary(parser* P) {
         return e;
     }
 
-    if (P->tok.type == TK_IDENT) {
+    if (P->tok.type == TK_PLACEHOLDER) {
+        ast* expr = node(P, N_PLACEHOLDER);
+        next(P);
+        return expr;
+    }
+
+    if (P->tok.type == TK_IDENT || P->tok.type == TK_SELF || P->tok.type == TK_SUPER) {
         ast* expr = node(P, N_IDENT);
         expr->as.ident.name = cs_strndup2(P->tok.start, P->tok.len);
         next(P);
@@ -306,7 +378,13 @@ static ast* parse_call(parser* P) {
                         cap *= 2;
                         args = (ast**)realloc(args, sizeof(ast*) * cap);
                     }
-                    args[cnt++] = parse_expr(P);
+                    if (accept(P, TK_DOTDOTDOT)) {
+                        ast* sp = node(P, N_SPREAD);
+                        sp->as.spread.expr = parse_expr(P);
+                        args[cnt++] = sp;
+                    } else {
+                        args[cnt++] = parse_expr(P);
+                    }
                     if (accept(P, TK_COMMA)) continue;
                     break;
                 }
@@ -576,8 +654,19 @@ static ast* parse_nullish(parser* P) {
     return left;
 }
 
+static ast* parse_pipe(parser* P) {
+    ast* left = parse_nullish(P);
+    while (accept(P, TK_PIPE)) {
+        ast* n = node(P, N_PIPE);
+        n->as.pipe.left = left;
+        n->as.pipe.right = parse_nullish(P);
+        left = n;
+    }
+    return left;
+}
+
 static ast* parse_expr(parser* P) {
-    ast* cond = parse_nullish(P);
+    ast* cond = parse_pipe(P);
     if (accept(P, TK_QMARK)) {
         ast* n = node(P, N_TERNARY);
         n->as.ternary.cond = cond;
@@ -610,11 +699,28 @@ static ast* parse_list_pattern(parser* P) {
     ast* n = node(P, N_PATTERN_LIST);
     size_t cap = 4, cnt = 0;
     char** names = NULL;
+    char* rest_name = NULL;
 
     if (P->tok.type != TK_RBRACKET) {
         names = (char**)malloc(sizeof(char*) * cap);
         while (1) {
-            if (P->tok.type != TK_IDENT) {
+            if (accept(P, TK_DOTDOTDOT)) {
+                if (rest_name) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "duplicate rest pattern");
+                    break;
+                }
+                if (P->tok.type != TK_IDENT) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "expected rest name in list pattern");
+                    break;
+                }
+                rest_name = cs_strndup2(P->tok.start, P->tok.len);
+                next(P);
+                if (accept(P, TK_COMMA)) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "rest pattern must be last");
+                }
+                break;
+            }
+            if (P->tok.type != TK_IDENT && P->tok.type != TK_PLACEHOLDER) {
                 if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier in list pattern");
                 break;
             }
@@ -633,6 +739,7 @@ static ast* parse_list_pattern(parser* P) {
     expect(P, TK_RBRACKET, "expected ']' after list pattern");
     n->as.list_pattern.names = names;
     n->as.list_pattern.count = cnt;
+    n->as.list_pattern.rest_name = rest_name;
     return n;
 }
 
@@ -641,12 +748,29 @@ static ast* parse_map_pattern(parser* P) {
     size_t cap = 4, cnt = 0;
     char** keys = NULL;
     char** names = NULL;
+    char* rest_name = NULL;
 
     if (P->tok.type != TK_RBRACE) {
         keys = (char**)malloc(sizeof(char*) * cap);
         names = (char**)malloc(sizeof(char*) * cap);
         while (1) {
-            if (P->tok.type != TK_IDENT) {
+            if (accept(P, TK_DOTDOTDOT)) {
+                if (rest_name) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "duplicate rest pattern");
+                    break;
+                }
+                if (P->tok.type != TK_IDENT) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "expected rest name in map pattern");
+                    break;
+                }
+                rest_name = cs_strndup2(P->tok.start, P->tok.len);
+                next(P);
+                if (accept(P, TK_COMMA)) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "rest pattern must be last");
+                }
+                break;
+            }
+            if (P->tok.type != TK_IDENT && P->tok.type != TK_PLACEHOLDER) {
                 if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier in map pattern");
                 break;
             }
@@ -683,6 +807,7 @@ static ast* parse_map_pattern(parser* P) {
     n->as.map_pattern.keys = keys;
     n->as.map_pattern.names = names;
     n->as.map_pattern.count = cnt;
+    n->as.map_pattern.rest_name = rest_name;
     return n;
 }
 
@@ -855,12 +980,12 @@ static ast* parse_match_pattern(parser* P) {
     if (accept(P, TK_LBRACKET)) return parse_list_pattern(P);
     if (accept(P, TK_LBRACE)) return parse_map_pattern(P);
 
-    if (P->tok.type == TK_IDENT) {
-        if (P->tok.len == 1 && P->tok.start[0] == '_') {
-            ast* n = node(P, N_PATTERN_WILDCARD);
-            next(P);
-            return n;
-        }
+    if (P->tok.type == TK_PLACEHOLDER) {
+        ast* n = node(P, N_PATTERN_WILDCARD);
+        next(P);
+        return n;
+    }
+    if (P->tok.type == TK_IDENT || P->tok.type == TK_SELF || P->tok.type == TK_SUPER) {
         ast* n = node(P, N_IDENT);
         n->as.ident.name = cs_strndup2(P->tok.start, P->tok.len);
         next(P);
@@ -900,6 +1025,47 @@ static ast* parse_match_pattern(parser* P) {
     return node(P, N_LIT_NIL);
 }
 
+static ast* parse_class(parser* P) {
+    ast* n = node(P, N_CLASS);
+    if (P->tok.type != TK_IDENT) {
+        if (!P->error) P->error = fmt_err(P, &P->tok, "expected class name");
+        return n;
+    }
+    n->as.class_stmt.name = cs_strndup2(P->tok.start, P->tok.len);
+    next(P);
+
+    if (accept(P, TK_COLON)) {
+        if (P->tok.type != TK_IDENT) {
+            if (!P->error) P->error = fmt_err(P, &P->tok, "expected parent class name");
+        } else {
+            n->as.class_stmt.parent = cs_strndup2(P->tok.start, P->tok.len);
+            next(P);
+        }
+    }
+
+    expect(P, TK_LBRACE, "expected '{' after class name");
+
+    size_t cap = 4, cnt = 0;
+    ast** methods = NULL;
+    if (P->tok.type != TK_RBRACE) {
+        methods = (ast**)malloc(sizeof(ast*) * cap);
+        while (P->tok.type != TK_RBRACE && P->tok.type != TK_EOF && !P->error) {
+            if (!accept(P, TK_FN)) {
+                if (!P->error) P->error = fmt_err(P, &P->tok, "expected 'fn' in class body");
+                break;
+            }
+            if (cnt == cap) { cap *= 2; methods = (ast**)realloc(methods, sizeof(ast*) * cap); }
+            methods[cnt++] = parse_fn(P);
+            if (P->tok.type == TK_SEMI) maybe_semi(P);
+        }
+    }
+    expect(P, TK_RBRACE, "expected '}' after class body");
+
+    n->as.class_stmt.methods = methods;
+    n->as.class_stmt.method_count = cnt;
+    return n;
+}
+
 static ast* parse_fn(parser* P) {
     ast* n = node(P, N_FNDEF);
 
@@ -914,17 +1080,51 @@ static ast* parse_fn(parser* P) {
 
     size_t cap = 4, cnt = 0;
     char** params = NULL;
+    ast** defaults = NULL;
+    int seen_default = 0;
+    char* rest_param = NULL;
 
     if (P->tok.type != TK_RPAREN) {
         params = (char**)malloc(sizeof(char*) * cap);
+        defaults = (ast**)calloc(cap, sizeof(ast*));
         while (1) {
+            if (accept(P, TK_DOTDOTDOT)) {
+                if (rest_param) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "duplicate rest parameter");
+                    break;
+                }
+                if (P->tok.type != TK_IDENT) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "expected rest parameter name");
+                    break;
+                }
+                rest_param = cs_strndup2(P->tok.start, P->tok.len);
+                next(P);
+                if (accept(P, TK_COMMA)) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "rest parameter must be last");
+                }
+                break;
+            }
             if (P->tok.type != TK_IDENT) {
                 if (!P->error) P->error = fmt_err(P, &P->tok, "expected parameter name");
                 break;
             }
-            if (cnt == cap) { cap *= 2; params = (char**)realloc(params, sizeof(char*) * cap); }
-            params[cnt++] = cs_strndup2(P->tok.start, P->tok.len);
+            if (cnt == cap) {
+                cap *= 2;
+                params = (char**)realloc(params, sizeof(char*) * cap);
+                defaults = (ast**)realloc(defaults, sizeof(ast*) * cap);
+                for (size_t i = cnt; i < cap; i++) defaults[i] = NULL;
+            }
+            params[cnt] = cs_strndup2(P->tok.start, P->tok.len);
             next(P);
+
+            if (accept(P, TK_ASSIGN)) {
+                defaults[cnt] = parse_expr(P);
+                seen_default = 1;
+            } else if (seen_default) {
+                if (!P->error) P->error = fmt_err(P, &P->tok, "non-default parameter after default parameter");
+                break;
+            }
+            cnt++;
 
             if (accept(P, TK_COMMA)) continue;
             break;
@@ -933,8 +1133,26 @@ static ast* parse_fn(parser* P) {
     expect(P, TK_RPAREN, "expected ')' after parameters");
 
     n->as.fndef.params = params;
+    n->as.fndef.defaults = defaults;
     n->as.fndef.param_count = cnt;
-    n->as.fndef.body = parse_block(P);
+    n->as.fndef.rest_param = rest_param;
+    if (accept(P, TK_ARROW)) {
+        if (P->tok.type == TK_LBRACE) {
+            n->as.fndef.body = parse_block(P);
+        } else {
+            ast* expr = parse_expr(P);
+            ast* block = node(P, N_BLOCK);
+            ast** items = (ast**)malloc(sizeof(ast*));
+            ast* ret = node(P, N_RETURN);
+            ret->as.ret_stmt.value = expr;
+            items[0] = ret;
+            block->as.block.items = items;
+            block->as.block.count = 1;
+            n->as.fndef.body = block;
+        }
+    } else {
+        n->as.fndef.body = parse_block(P);
+    }
     return n;
 }
 
@@ -1069,6 +1287,10 @@ static ast* parse_stmt(parser* P) {
         n->as.throw_stmt.value = parse_expr(P);
         maybe_semi(P);
         return n;
+    }
+
+    if (accept(P, TK_CLASS)) {
+        return parse_class(P);
     }
 
     if (accept(P, TK_EXPORT)) {
@@ -1238,7 +1460,9 @@ static ast* parse_stmt(parser* P) {
     }
 
     if (accept(P, TK_FN)) {
-        return parse_fn(P);
+        ast* n = parse_fn(P);
+        maybe_semi(P);
+        return n;
     }
 
     if (accept(P, TK_IF)) {
@@ -1276,7 +1500,7 @@ static ast* parse_stmt(parser* P) {
     }
 
     // assignment: lvalue (= expr) where lvalue is IDENT / GETFIELD / INDEX
-    if (P->tok.type == TK_IDENT) {
+    if (P->tok.type == TK_IDENT || P->tok.type == TK_SELF) {
         // lookahead with a copy
         lexer saveL = P->L;
         token saveT = P->tok;
@@ -1398,6 +1622,14 @@ void ast_free(ast* node) {
             free(node->as.export_stmt.name);
             ast_free(node->as.export_stmt.value);
             break;
+        case N_CLASS:
+            free(node->as.class_stmt.name);
+            free(node->as.class_stmt.parent);
+            for (size_t i = 0; i < node->as.class_stmt.method_count; i++) {
+                ast_free(node->as.class_stmt.methods[i]);
+            }
+            free(node->as.class_stmt.methods);
+            break;
         case N_EXPORT_LIST:
             for (size_t i = 0; i < node->as.export_list.count; i++) {
                 free(node->as.export_list.local_names[i]);
@@ -1435,8 +1667,11 @@ void ast_free(ast* node) {
             free(node->as.fndef.name);
             for (size_t i = 0; i < node->as.fndef.param_count; i++) {
                 free(node->as.fndef.params[i]);
+                if (node->as.fndef.defaults) ast_free(node->as.fndef.defaults[i]);
             }
             free(node->as.fndef.params);
+            free(node->as.fndef.defaults);
+            free(node->as.fndef.rest_param);
             ast_free(node->as.fndef.body);
             break;
         case N_BINOP:
@@ -1454,6 +1689,10 @@ void ast_free(ast* node) {
             ast_free(node->as.ternary.cond);
             ast_free(node->as.ternary.then_e);
             ast_free(node->as.ternary.else_e);
+            break;
+        case N_PIPE:
+            ast_free(node->as.pipe.left);
+            ast_free(node->as.pipe.right);
             break;
         case N_CALL:
             ast_free(node->as.call.callee);
@@ -1477,8 +1716,11 @@ void ast_free(ast* node) {
         case N_FUNCLIT:
             for (size_t i = 0; i < node->as.funclit.param_count; i++) {
                 free(node->as.funclit.params[i]);
+                if (node->as.funclit.defaults) ast_free(node->as.funclit.defaults[i]);
             }
             free(node->as.funclit.params);
+            free(node->as.funclit.defaults);
+            free(node->as.funclit.rest_param);
             ast_free(node->as.funclit.body);
             break;
         case N_LISTLIT:
@@ -1500,6 +1742,7 @@ void ast_free(ast* node) {
                 free(node->as.list_pattern.names[i]);
             }
             free(node->as.list_pattern.names);
+            free(node->as.list_pattern.rest_name);
             break;
         case N_PATTERN_MAP:
             for (size_t i = 0; i < node->as.map_pattern.count; i++) {
@@ -1508,9 +1751,15 @@ void ast_free(ast* node) {
             }
             free(node->as.map_pattern.keys);
             free(node->as.map_pattern.names);
+            free(node->as.map_pattern.rest_name);
+            break;
+        case N_SPREAD:
+            ast_free(node->as.spread.expr);
             break;
         case N_IDENT:
             free(node->as.ident.name);
+            break;
+        case N_PLACEHOLDER:
             break;
         case N_LIT_STR:
             free(node->as.lit_str.s);
@@ -1525,6 +1774,7 @@ void ast_free(ast* node) {
         case N_LIT_FLOAT:
         case N_LIT_BOOL:
         case N_LIT_NIL:
+        case N_PATTERN_WILDCARD:
         case N_BREAK:
         case N_CONTINUE:
             // No dynamic allocations

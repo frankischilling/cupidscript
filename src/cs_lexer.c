@@ -137,9 +137,13 @@ static token_type keyword_type(const char* s, size_t n) {
     if (n == 5 && memcmp(s, "catch", 5) == 0) return TK_CATCH;
     if (n == 7 && memcmp(s, "finally", 7) == 0) return TK_FINALLY;
     if (n == 6 && memcmp(s, "export", 6) == 0) return TK_EXPORT;
+    if (n == 5 && memcmp(s, "class", 5) == 0) return TK_CLASS;
+    if (n == 4 && memcmp(s, "self", 4) == 0) return TK_SELF;
+    if (n == 5 && memcmp(s, "super", 5) == 0) return TK_SUPER;
     if (n == 4 && memcmp(s, "true", 4) == 0) return TK_TRUE;
     if (n == 5 && memcmp(s, "false", 5) == 0) return TK_FALSE;
     if (n == 3 && memcmp(s, "nil", 3) == 0) return TK_NIL;
+    if (n == 1 && s[0] == '_') return TK_PLACEHOLDER;
     return TK_IDENT;
 }
 
@@ -345,10 +349,13 @@ token lex_next(lexer* L) {
         case ',': t = TK_COMMA; break;
         case ';': t = TK_SEMI; break;
         case '.':
-            // Check for .. or ..=
+            // Check for ... or .. or ..=
             if (peek(L) == '.') {
                 advance(L);
-                if (peek(L) == '=') {
+                if (peek(L) == '.') {
+                    advance(L);
+                    t = TK_DOTDOTDOT;
+                } else if (peek(L) == '=') {
                     advance(L);
                     t = TK_RANGE_INC;
                 } else {
@@ -390,6 +397,7 @@ token lex_next(lexer* L) {
 
         case '=':
             if (peek(L) == '=') { advance(L); t = TK_EQ; }
+            else if (peek(L) == '>') { advance(L); t = TK_ARROW; }
             else t = TK_ASSIGN;
             break;
 
@@ -409,6 +417,7 @@ token lex_next(lexer* L) {
 
         case '|':
             if (peek(L) == '|') { advance(L); t = TK_OROR; }
+            else if (peek(L) == '>') { advance(L); t = TK_PIPE; }
             break;
         default:
             t = TK_ERR;

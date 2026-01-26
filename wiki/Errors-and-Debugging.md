@@ -44,16 +44,23 @@ Common runtime errors:
 
 ## Exception Handling
 
-CupidScript supports exception handling via `throw` and `try/catch`:
+CupidScript supports exception handling via `throw`, `try/catch`, and optional `finally`:
 
 ```c
 try {
   if (x < 0) {
-    throw "Invalid input: negative number";
+    throw error("Invalid input: negative number", "INVALID_ARG");
   }
   process(x);
 } catch (e) {
-  print("Error caught:", e);
+  if (is_error(e)) {
+    print("Error caught:", e.msg);
+  } else {
+    print("Error caught:", e);
+  }
+} finally {
+  // cleanup that should always run
+  print("cleanup");
 }
 ```
 
@@ -99,6 +106,9 @@ try {
   } else {
     print("Caught:", e);
   }
+} finally {
+  // release resources or reset state
+  print("cleanup done");
 }
 ```
 
@@ -108,6 +118,12 @@ Benefits of error objects:
 * Automatic stack trace capture
 * Optional error codes for categorization
 * Easy to check with `is_error()`
+
+`finally` can be a block or a single expression statement:
+
+```c
+try { do_work(); } catch (e) { print(e); } finally cleanup();
+```
 
 ## Stack Traces
 

@@ -18,7 +18,7 @@ Recognizes:
 
 * integers (decimal with underscores, or hex `0xFF` with underscores)
 * floats (decimal point required: `3.14`, scientific notation: `1.5e-3`, `2e10`)
-* identifiers / keywords: `let`, `fn`, `if`, `else`, `while`, `for`, `in`, `return`, `break`, `continue`, `throw`, `try`, `catch`, `true`, `false`, `nil`
+* identifiers / keywords: `let`, `fn`, `if`, `else`, `while`, `for`, `in`, `return`, `break`, `continue`, `throw`, `try`, `catch`, `finally`, `export`, `import`, `from`, `as`, `true`, `false`, `nil`
 * strings (double-quoted, allows escapes)
 * operators/punctuation:
 
@@ -46,7 +46,9 @@ Statements:
 * `N_IF`, `N_WHILE`, `N_RETURN`
 * `N_FORIN` (for-in loops)
 * `N_BREAK`, `N_CONTINUE`
-* `N_THROW`, `N_TRY` (exception handling)
+* `N_THROW`, `N_TRY` (exception handling, with optional `finally` block)
+* `N_EXPORT`, `N_EXPORT_LIST` (module exports)
+* `N_IMPORT` (module imports)
 * `N_EXPR_STMT`
 * `N_FNDEF`
 

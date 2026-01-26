@@ -16,6 +16,51 @@ Your stdlib includes:
 * `require("file.cs")` to run-once include (tracks already-required paths)
 * `require_optional("file.cs")` to conditionally load a file (returns `nil` if not found)
 
+## Tests
+
+Tests are plain `.cs` files under `tests/`. The test runner executes every `tests/*.cs` file and treats a non-zero exit (thrown error) as a failure.
+
+Run all tests:
+
+```sh
+make test
+```
+
+### Writing Tests
+
+1. Create a new file in `tests/` (e.g. `tests/my_feature.cs`).
+2. Use `assert(condition, "message")` for checks.
+3. Optionally print a success marker at the end.
+
+Example:
+
+```c
+// tests/my_feature.cs
+let x = 1 + 2;
+assert(x == 3, "basic math");
+print("my_feature ok");
+```
+
+### Negative Tests (Expected Failures)
+
+If a test should fail, add this header and the runner will invert the expectation:
+
+```c
+// EXPECT_FAIL
+```
+
+Example:
+
+```c
+// tests/negative_example.cs
+// EXPECT_FAIL
+assert(false, "should fail");
+```
+
+### Helper Files
+
+Files starting with `_` are ignored by the test runner. Use them for shared fixtures.
+
 ## Hello World
 
 ```c

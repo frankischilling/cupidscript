@@ -45,17 +45,37 @@ Dynamic array of `cs_value`.
 
 ### `map`
 
-Simple key/value map with **string keys**.
+Simple key/value map with **generalized keys**.
 
-* Indexing: `m["key"]`
+* Keys can be any value (string, int, bool, list, map, etc.)
+* Indexing: `m[key]`
 * Missing keys return `nil`
-* Field access is sugar: `m.key` reads `"key"` from map
+* Field access is sugar: `m.key` reads `"key"` from map (string key)
+
+Key equality uses the same rules as `==`:
+
+* `int` and `float` compare by numeric value (so `1` equals `1.0`)
+* `string` compares by content
+* Other heap objects compare by identity (same object)
 
 ### `strbuf`
 
 Mutable string builder object.
 
 * Has method-like calls: `sb.append(x)`, `sb.str()`, `sb.clear()`, `sb.len()`
+
+## Mutability
+
+* Lists and maps are mutable.
+* Strings are immutable.
+* `const` creates an immutable binding (reassignment is not allowed), but the value itself may still be mutable (e.g., list/map contents).
+
+### `range`
+
+Lazy range object produced by the `..` / `..=` operators or by `range(...)`.
+
+* Iterable with `for x in range { ... }`
+* Does not allocate a list
 
 ## Truthiness Rules
 

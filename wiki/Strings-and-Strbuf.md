@@ -9,9 +9,26 @@
 "line1\nline2"
 ```
 
+Raw (backtick) strings:
+
+```c
+`C:\\temp\\file`
+`line1
+line2`
+```
+
+Notes:
+
+* Backtick strings do not process escapes (backslashes are literal).
+* They can span multiple lines.
+* String interpolation is not supported inside backtick strings.
+* A backtick cannot appear inside a backtick string.
+
 Escapes supported:
 
 * `\n \t \r \" \\`
+* `\e` for ASCII ESC (27)
+* `\xHH` for a single byte using two hex digits
 * Unknown escapes become literal character (e.g. `\q` → `q`)
 
 ### Concatenation with `+`
@@ -25,6 +42,30 @@ Example:
 
 ```c
 print("x=" + 10);
+```
+
+### String interpolation
+
+CupidScript supports `${...}` expressions inside double-quoted strings.
+
+```c
+let name = "Ada";
+let count = 3;
+print("Hello ${name}, you have ${count} messages.");
+```
+
+Notes:
+
+* Any expression is allowed inside `${...}`.
+* Values are converted to strings using the same representation as `to_str()`.
+* Escapes still work inside the literal parts of the string.
+
+Examples:
+
+```c
+print("x=${1 + 2}");
+print("bool=${true}");
+print("nil=${nil}");
 ```
 
 ### String helpers (stdlib)
@@ -45,9 +86,9 @@ New string manipulation functions for common operations:
 
 #### Trimming
 
-* `str_trim(s)` - Remove whitespace from both ends
-* `str_ltrim(s)` - Remove leading whitespace
-* `str_rtrim(s)` - Remove trailing whitespace
+* `str_trim(s)` / `trim(s)` - Remove whitespace from both ends
+* `str_ltrim(s)` / `ltrim(s)` - Remove leading whitespace
+* `str_rtrim(s)` / `rtrim(s)` - Remove trailing whitespace
 
 ```c
 let s = "  hello world  ";
@@ -58,8 +99,8 @@ print(str_rtrim(s));   // "  hello world"
 
 #### Case Conversion
 
-* `str_lower(s)` - Convert to lowercase
-* `str_upper(s)` - Convert to uppercase
+* `str_lower(s)` / `lower(s)` - Convert to lowercase
+* `str_upper(s)` / `upper(s)` - Convert to uppercase
 
 ```c
 print(str_lower("Hello World"));  // "hello world"
@@ -68,8 +109,8 @@ print(str_upper("Hello World"));  // "HELLO WORLD"
 
 #### Substring Checks
 
-* `str_startswith(s, prefix)` - Check if string starts with prefix
-* `str_endswith(s, suffix)` - Check if string ends with suffix
+* `str_startswith(s, prefix)` / `starts_with(s, prefix)` - Check if string starts with prefix
+* `str_endswith(s, suffix)` / `ends_with(s, suffix)` - Check if string ends with suffix
 
 ```c
 print(str_startswith("hello.txt", "hello"));  // true
@@ -80,10 +121,12 @@ print(str_startswith("hello.txt", "world"));  // false
 #### String Utilities
 
 * `str_repeat(s, count)` - Repeat string N times
+* `split_lines(s)` - Split into lines on `\n` or `\r\n`
 
 ```c
 print(str_repeat("abc", 3));  // "abcabcabc"
 print(str_repeat("x", 5));    // "xxxxx"
+print(split_lines("a\n b\r\n")); // ["a", " b", ""]
 ```
 
 ## strbuf (string builder)

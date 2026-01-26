@@ -25,7 +25,7 @@ print("sum:", add(xs[0], xs[1]));
 
 ### Keywords
 
-`let`, `fn`, `if`, `else`, `while`, `for`, `in`, `break`, `continue`, `return`, `throw`, `try`, `catch`, `true`, `false`, `nil`
+`let`, `fn`, `if`, `else`, `while`, `switch`, `case`, `default`, `for`, `in`, `break`, `continue`, `return`, `throw`, `try`, `catch`, `true`, `false`, `nil`
 
 ### Expressions
 

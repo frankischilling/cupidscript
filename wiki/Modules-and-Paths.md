@@ -11,6 +11,11 @@ The VM tracks a directory stack. When you call `load("rel.cs")` or `require("rel
 
 This is used so scripts can load other scripts relative to themselves.
 
+You can inspect or change the current directory from script code:
+
+* `cwd()` returns the VM's current directory (string)
+* `chdir(path)` updates the current directory used for resolving relative paths
+
 ## `load(path)`
 
 Runs a file immediately (every time you call it).
@@ -36,6 +41,30 @@ Inside a required file, the VM provides:
 * `exports` (map) - values to export
 * `__file__` (string) - resolved module path
 * `__dir__` (string) - directory containing the module
+
+You can populate exports either directly or with the `export` statement:
+
+```c
+export foo = 123;
+export greet = fn(name) { return "hello " + name; };
+export { foo as foo2, greet as hi };
+
+// equivalent:
+exports["foo"] = 123;
+exports["greet"] = fn(name) { return "hello " + name; };
+exports["foo2"] = exports["foo"];
+exports["hi"] = exports["greet"];
+```
+
+You can also import with statement syntax (sugar over `require()`):
+
+```c
+import "./util.cs";                 // side effects only
+import util from "./util.cs";        // exports map
+import {join, ext as path_ext} from "./util.cs";
+```
+
+If a script is executed directly (not via `require()`), `export` will create a global `exports` map automatically.
 
 ## `require_optional(path)`
 

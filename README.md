@@ -81,6 +81,11 @@ Other useful scripts:
 - `bin/cupidscript examples/json.cs`
 - `bin/cupidscript examples/json_example.cs`
 - `bin/cupidscript examples/list_helpers.cs`
+- `bin/cupidscript examples/arrow_functions.cs`
+- `bin/cupidscript examples/spread_rest.cs`
+- `bin/cupidscript examples/pipe_operator.cs`
+- `bin/cupidscript examples/classes.cs`
+- `bin/cupidscript examples/default_params.cs`
 
 ---
 
@@ -99,6 +104,11 @@ fn add(a, b) {       // function definition
   return a + b;
 }
 
+fn add2(a, b) => a + b;       // arrow function
+fn greet(name, greeting = "Hello") {
+  return greeting + ", " + name + "!";
+}
+
 if (cond) { ... } else { ... }
 while (cond) { ... }
 for x in expr { ... }           // for-in over lists/maps
@@ -111,6 +121,17 @@ throw expr;
 try { ... } catch (e) { ... } finally { ... }
 export name = expr; // module exports
 switch (expr) { case 1 { ... } default { ... } }
+
+// classes
+class File {
+  fn new(path) { self.path = path; }
+  fn is_hidden() { return starts_with(self.path, "."); }
+}
+
+class ImageFile : File {
+  fn new(path) { super.new(path); self.is_img = ends_with(path, ".png"); }
+  fn is_image() { return self.is_img; }
+}
 ```
 
 Assignment rule (intentional): `let` creates new variables; plain assignment (`x = ...`) errors if `x` was never declared. This prevents silent typos like `coutn = 1`.
@@ -118,12 +139,14 @@ Assignment rule (intentional): `let` creates new variables; plain assignment (`x
 ### Expressions
 
 - Operators with precedence: `||`, `&&`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `%`, unary `!`, unary `-`
+- Pipe operator: `|>` (passes left value into the right call, supports `_` placeholder)
 - Range operators: `start..end` (exclusive), `start..=end` (inclusive)
 - Ternary: `cond ? a : b`
 - Strings: `"..."` with escapes `\n`, `\t`, `\r`, `\"`, `\\`
 - Integers: decimal (`123`), hex (`0xFF`), underscores (`1_000_000`)
 - Floats: decimal with dot (`3.14`), scientific notation (`1.5e-3`, `2e10`)
 - Literals: list (`[1, 2, "hi"]`), map (`{ "a": 1, "b": 2 }`)
+- Spread in literals: `[0, ...xs]`, `{...m1, ...m2}`
 - Dynamic values: `nil`, `true/false`, integers, floats, strings, functions, native functions, lists, maps, strbuf
 
 Notes:
@@ -137,10 +160,13 @@ Lists and maps are first-class dynamic values.
 
 ```cs
 let xs = [10, 20];
+let ys = [0, ...xs, 30];
 xs[1] = 99;
 print(xs[0], xs[1], len(xs)); // 10 99 2
 
 let m = { "name": "cupid" };
+let m2 = {"name": "cupid", "version": 1};
+let m3 = {...m, ...m2};
 print(m["name"]);             // cupid
 print(keys(m));               // list of keys
 ```
@@ -202,6 +228,43 @@ print(lib.hello("world"));
 - `strbuf` also exposes methods like `b.append(...)`, `b.str()`, `b.len()`, `b.clear()`.
 
 Compatibility note: CupidFM-style dotted globals still work (e.g. `fm.status("hi")`) even if `fm` is not a script value; the VM falls back to looking up a global named `"fm.status"`.
+
+### Classes and `self` / `super`
+
+Classes are first-class values and are called to create instances. Methods are invoked on instances, with `self` bound automatically.
+
+```cs
+class File {
+  fn new(path) { self.path = path; }
+  fn is_hidden() { return starts_with(self.path, "."); }
+}
+
+class ImageFile : File {
+  fn new(path) { super.new(path); self.is_img = ends_with(path, ".png"); }
+  fn is_image() { return self.is_img; }
+}
+
+let img = ImageFile("cat.png");
+print(img.is_image());
+```
+
+### Rest parameters
+
+Functions can collect extra arguments into a list:
+
+```cs
+fn log_all(prefix, ...items) {
+  for item in items { print(prefix, item); }
+}
+```
+
+### Pipe operator
+
+```cs
+fn add(a, b) { return a + b; }
+print(10 |> add(5));     // add(10, 5)
+print(10 |> add(5, _));  // add(5, 10)
+```
 
 ---
 

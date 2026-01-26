@@ -98,6 +98,16 @@ for (i = 0; i < 10; i = i + 1) {
   print(i);
 }
 
+// `let` is allowed in the init clause
+for (let i = 0; i < 3; i += 1) {
+  print(i);
+}
+
+// Compound assignments are supported in the header
+for (let j = 5; j > 0; j -= 1) {
+  print(j);
+}
+
 // Multiple initializations (using comma isn't supported, use separate statements)
 let i = 0;
 let j = 10;
@@ -121,7 +131,7 @@ Syntax:
 * `start..end` - Exclusive range (up to but not including end)
 * `start..=end` - Inclusive range (up to and including end)
 
-Creates a list of integers from `start` to `end`:
+Creates a lazy range from `start` to `end`:
 
 ```c
 let nums = 0..5;      // [0, 1, 2, 3, 4]
@@ -139,7 +149,7 @@ for i in 1..=100 {
 }
 ```
 
-The range operator works in both directions (ascending and descending) automatically.
+The range operator returns a lazy range object and works in both directions (ascending and descending) automatically.
 
 ## `return`
 
@@ -154,7 +164,7 @@ Return can appear inside any block; it returns from the current function call.
 
 ## `break` / `continue`
 
-* `break;` exits the innermost loop
+* `break;` exits the innermost loop or `switch`
 * `continue;` skips to the next iteration
 
 Valid in `while`, `for...in`, and C-style `for` loops.
@@ -169,6 +179,104 @@ while (true) {
   print(x);
 }
 ```
+
+## `switch`
+
+Syntax:
+
+```c
+switch (expr) {
+  case 1 { print("one"); }
+  case 2 { print("two"); }
+  default { print("other"); }
+}
+```
+
+Rules:
+
+* `switch` evaluates `expr` once, then compares against each `case` value in order.
+* Supported matching is easiest/most common with `int`, `string`, `bool`, and `nil`.
+* **Non-fallthrough:** once a case matches, its block runs and the `switch` is finished.
+* `default` (optional) runs if no case matches.
+
+## `defer`
+
+The `defer` statement schedules cleanup code to run when the current block exits.
+
+Syntax:
+
+```c
+defer expr;
+defer { /* block */ }
+```
+
+Rules:
+
+* Defers run in **last-in, first-out** order when leaving the current block.
+* Defers run on normal block exit, and also on `return`, `break`, `continue`, or `throw`.
+* `defer` is usually used for cleanup like closing files or restoring state.
+
+## `match` Expression
+
+Syntax:
+
+```c
+let label = match (x) {
+  case 1: "one";
+  case 2: "two";
+  default: "other";
+};
+```
+
+Pattern syntax:
+
+```c
+let out = match (value) {
+  case [a, b]: a + b;              // list pattern (binds a, b)
+  case {x, y: z}: x + z;           // map pattern (keys x, y; binds y to z)
+  case _ : "anything";            // wildcard
+  case n if n > 10: "big";        // guard (optional)
+  default: "other";
+};
+```
+
+Rules:
+
+* `match` evaluates the input expression once, then tests each `case` pattern in order.
+* Patterns can bind identifiers; bindings are visible in the guard and case result.
+* Guards (`if expr`) are optional and only run if the pattern matches.
+* The first matching case expression is evaluated and returned.
+* `default` (optional) is returned if no case matches.
+* If no case matches and there is no `default`, the result is `nil`.
+
+## `try` / `catch` / `finally`
+
+Syntax:
+
+```c
+try {
+  // work
+} catch (e) {
+  // error handling
+} finally {
+  // cleanup (always runs)
+}
+
+// finally can also be a single expression:
+try {
+  work();
+} catch (e) {
+  print(e);
+} finally cleanup();
+```
+
+Notes:
+
+* `catch` is required; `finally` is optional.
+* The `finally` block runs on normal completion, `return`, `break`/`continue`, or `throw`.
+* `finally` can be a block or a single expression statement.
+* If `finally` itself returns or throws, it overrides the prior control flow.
+* `break;` inside a `switch` exits the switch (not an enclosing loop).
 
 ## Ternary Expression
 
