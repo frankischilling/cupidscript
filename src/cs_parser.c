@@ -24,6 +24,7 @@ void parser_init(parser* P, const char* src, const char* source_name) {
     memset(P, 0, sizeof(*P));
     lex_init(&P->L, src);
     P->source_name = source_name ? source_name : "<input>";
+    P->saw_yield = 0;
     next(P);
 }
 
@@ -57,9 +58,12 @@ static int expect(parser* P, token_type t, const char* msg) {
 static ast* parse_stmt(parser* P);
 static ast* parse_block(parser* P);
 static ast* parse_expr(parser* P);
-static ast* parse_fn(parser* P);
+static ast* parse_fn(parser* P, int is_async);
+static ast* parse_fn_expr(parser* P, int is_async);
 static ast* parse_interpolated_string(parser* P);
 static ast* parse_match_expr(parser* P);
+static ast* parse_struct(parser* P);
+static ast* parse_enum(parser* P);
 static ast* parse_list_pattern(parser* P);
 static ast* parse_map_pattern(parser* P);
 static ast* parse_match_pattern(parser* P);
@@ -80,7 +84,7 @@ static ast* parse_switch(parser* P) {
     size_t cap = 4, cnt = 0;
     ast** case_exprs = (ast**)malloc(sizeof(ast*) * cap);
     ast** case_blocks = (ast**)malloc(sizeof(ast*) * cap);
-    ast* default_block = NULL;
+    int default_seen = 0;
 
     if (!case_exprs || !case_blocks) {
         free(case_exprs);
@@ -92,7 +96,6 @@ static ast* parse_switch(parser* P) {
         n->as.switch_stmt.case_exprs = NULL;
         n->as.switch_stmt.case_blocks = NULL;
         n->as.switch_stmt.case_count = 0;
-        n->as.switch_stmt.default_block = NULL;
         return n;
     }
 
@@ -114,11 +117,23 @@ static ast* parse_switch(parser* P) {
         }
 
         if (accept(P, TK_DEFAULT)) {
-            if (default_block) {
+            if (default_seen) {
                 if (!P->error) P->error = fmt_err(P, &P->tok, "duplicate default in switch");
                 break;
             }
-            default_block = parse_block(P);
+            if (cnt == cap) {
+                cap *= 2;
+                ast** ne = (ast**)realloc(case_exprs, sizeof(ast*) * cap);
+                if (!ne) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
+                case_exprs = ne;
+                ast** nb = (ast**)realloc(case_blocks, sizeof(ast*) * cap);
+                if (!nb) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
+                case_blocks = nb;
+            }
+            case_exprs[cnt] = NULL;
+            case_blocks[cnt] = parse_block(P);
+            cnt++;
+            default_seen = 1;
             continue;
         }
 
@@ -131,11 +146,10 @@ static ast* parse_switch(parser* P) {
     n->as.switch_stmt.case_exprs = case_exprs;
     n->as.switch_stmt.case_blocks = case_blocks;
     n->as.switch_stmt.case_count = cnt;
-    n->as.switch_stmt.default_block = default_block;
     return n;
 }
 
-static ast* parse_fn_expr(parser* P) {
+static ast* parse_fn_expr(parser* P, int is_async) {
     ast* n = node(P, N_FUNCLIT);
     expect(P, TK_LPAREN, "expected '(' after fn");
 
@@ -197,6 +211,10 @@ static ast* parse_fn_expr(parser* P) {
     n->as.funclit.defaults = defaults;
     n->as.funclit.param_count = cnt;
     n->as.funclit.rest_param = rest_param;
+    n->as.funclit.is_async = is_async;
+    int prev_yield = P->saw_yield;
+    P->saw_yield = 0;
+
     if (accept(P, TK_ARROW)) {
         if (P->tok.type == TK_LBRACE) {
             n->as.funclit.body = parse_block(P);
@@ -214,6 +232,8 @@ static ast* parse_fn_expr(parser* P) {
     } else {
         n->as.funclit.body = parse_block(P);
     }
+    n->as.funclit.is_generator = P->saw_yield ? 1 : 0;
+    P->saw_yield = prev_yield;
     return n;
 }
 
@@ -334,8 +354,16 @@ static ast* parse_primary(parser* P) {
         return n;
     }
 
+    if (accept(P, TK_ASYNC)) {
+        if (!accept(P, TK_FN)) {
+            if (!P->error) P->error = fmt_err(P, &P->tok, "expected 'fn' after async");
+            return node(P, N_LIT_NIL);
+        }
+        return parse_fn_expr(P, 1);
+    }
+
     if (accept(P, TK_FN)) {
-        return parse_fn_expr(P);
+        return parse_fn_expr(P, 0);
     }
 
     if (accept(P, TK_LPAREN)) {
@@ -434,6 +462,11 @@ static ast* parse_call(parser* P) {
 }
 
 static ast* parse_unary(parser* P) {
+    if (accept(P, TK_AWAIT)) {
+        ast* n = node(P, N_AWAIT);
+        n->as.await_expr.expr = parse_unary(P);
+        return n;
+    }
     if (P->tok.type == TK_BANG || P->tok.type == TK_MINUS) {
         int op = P->tok.type;
         next(P);
@@ -1050,12 +1083,14 @@ static ast* parse_class(parser* P) {
     if (P->tok.type != TK_RBRACE) {
         methods = (ast**)malloc(sizeof(ast*) * cap);
         while (P->tok.type != TK_RBRACE && P->tok.type != TK_EOF && !P->error) {
+            int is_async = 0;
+            if (accept(P, TK_ASYNC)) is_async = 1;
             if (!accept(P, TK_FN)) {
                 if (!P->error) P->error = fmt_err(P, &P->tok, "expected 'fn' in class body");
                 break;
             }
             if (cnt == cap) { cap *= 2; methods = (ast**)realloc(methods, sizeof(ast*) * cap); }
-            methods[cnt++] = parse_fn(P);
+            methods[cnt++] = parse_fn(P, is_async);
             if (P->tok.type == TK_SEMI) maybe_semi(P);
         }
     }
@@ -1066,7 +1101,109 @@ static ast* parse_class(parser* P) {
     return n;
 }
 
-static ast* parse_fn(parser* P) {
+static ast* parse_struct(parser* P) {
+    ast* n = node(P, N_STRUCT);
+    if (P->tok.type != TK_IDENT) {
+        if (!P->error) P->error = fmt_err(P, &P->tok, "expected struct name");
+        return n;
+    }
+    n->as.struct_stmt.name = cs_strndup2(P->tok.start, P->tok.len);
+    next(P);
+
+    expect(P, TK_LBRACE, "expected '{' after struct name");
+
+    size_t cap = 4, cnt = 0;
+    char** fields = NULL;
+    ast** defaults = NULL;
+    if (P->tok.type != TK_RBRACE) {
+        fields = (char**)malloc(sizeof(char*) * cap);
+        defaults = (ast**)calloc(cap, sizeof(ast*));
+        while (P->tok.type != TK_RBRACE && P->tok.type != TK_EOF && !P->error) {
+            if (P->tok.type != TK_IDENT) {
+                if (!P->error) P->error = fmt_err(P, &P->tok, "expected field name in struct");
+                break;
+            }
+            if (cnt == cap) {
+                cap *= 2;
+                fields = (char**)realloc(fields, sizeof(char*) * cap);
+                defaults = (ast**)realloc(defaults, sizeof(ast*) * cap);
+                for (size_t i = cnt; i < cap; i++) defaults[i] = NULL;
+            }
+            fields[cnt] = cs_strndup2(P->tok.start, P->tok.len);
+            next(P);
+
+            if (accept(P, TK_ASSIGN)) {
+                defaults[cnt] = parse_expr(P);
+            }
+            cnt++;
+
+            if (accept(P, TK_COMMA) || accept(P, TK_SEMI)) {
+                if (P->tok.type == TK_RBRACE) break;
+                continue;
+            }
+            break;
+        }
+    }
+    expect(P, TK_RBRACE, "expected '}' after struct body");
+
+    n->as.struct_stmt.field_names = fields;
+    n->as.struct_stmt.field_defaults = defaults;
+    n->as.struct_stmt.field_count = cnt;
+    return n;
+}
+
+static ast* parse_enum(parser* P) {
+    ast* n = node(P, N_ENUM);
+    if (P->tok.type != TK_IDENT) {
+        if (!P->error) P->error = fmt_err(P, &P->tok, "expected enum name");
+        return n;
+    }
+    n->as.enum_stmt.name = cs_strndup2(P->tok.start, P->tok.len);
+    next(P);
+
+    expect(P, TK_LBRACE, "expected '{' after enum name");
+
+    size_t cap = 4, cnt = 0;
+    char** names = NULL;
+    ast** values = NULL;
+    if (P->tok.type != TK_RBRACE) {
+        names = (char**)malloc(sizeof(char*) * cap);
+        values = (ast**)calloc(cap, sizeof(ast*));
+        while (P->tok.type != TK_RBRACE && P->tok.type != TK_EOF && !P->error) {
+            if (P->tok.type != TK_IDENT) {
+                if (!P->error) P->error = fmt_err(P, &P->tok, "expected enum member name");
+                break;
+            }
+            if (cnt == cap) {
+                cap *= 2;
+                names = (char**)realloc(names, sizeof(char*) * cap);
+                values = (ast**)realloc(values, sizeof(ast*) * cap);
+                for (size_t i = cnt; i < cap; i++) values[i] = NULL;
+            }
+            names[cnt] = cs_strndup2(P->tok.start, P->tok.len);
+            next(P);
+
+            if (accept(P, TK_ASSIGN)) {
+                values[cnt] = parse_expr(P);
+            }
+            cnt++;
+
+            if (accept(P, TK_COMMA) || accept(P, TK_SEMI)) {
+                if (P->tok.type == TK_RBRACE) break;
+                continue;
+            }
+            break;
+        }
+    }
+    expect(P, TK_RBRACE, "expected '}' after enum body");
+
+    n->as.enum_stmt.names = names;
+    n->as.enum_stmt.values = values;
+    n->as.enum_stmt.count = cnt;
+    return n;
+}
+
+static ast* parse_fn(parser* P, int is_async) {
     ast* n = node(P, N_FNDEF);
 
     if (P->tok.type != TK_IDENT) {
@@ -1136,6 +1273,11 @@ static ast* parse_fn(parser* P) {
     n->as.fndef.defaults = defaults;
     n->as.fndef.param_count = cnt;
     n->as.fndef.rest_param = rest_param;
+    n->as.fndef.is_async = is_async;
+
+    int prev_yield = P->saw_yield;
+    P->saw_yield = 0;
+
     if (accept(P, TK_ARROW)) {
         if (P->tok.type == TK_LBRACE) {
             n->as.fndef.body = parse_block(P);
@@ -1153,6 +1295,8 @@ static ast* parse_fn(parser* P) {
     } else {
         n->as.fndef.body = parse_block(P);
     }
+    n->as.fndef.is_generator = P->saw_yield ? 1 : 0;
+    P->saw_yield = prev_yield;
     return n;
 }
 
@@ -1287,6 +1431,14 @@ static ast* parse_stmt(parser* P) {
         n->as.throw_stmt.value = parse_expr(P);
         maybe_semi(P);
         return n;
+    }
+
+    if (accept(P, TK_STRUCT)) {
+        return parse_struct(P);
+    }
+
+    if (accept(P, TK_ENUM)) {
+        return parse_enum(P);
     }
 
     if (accept(P, TK_CLASS)) {
@@ -1460,7 +1612,17 @@ static ast* parse_stmt(parser* P) {
     }
 
     if (accept(P, TK_FN)) {
-        ast* n = parse_fn(P);
+        ast* n = parse_fn(P, 0);
+        maybe_semi(P);
+        return n;
+    }
+
+    if (accept(P, TK_ASYNC)) {
+        if (!accept(P, TK_FN)) {
+            if (!P->error) P->error = fmt_err(P, &P->tok, "expected 'fn' after async");
+            return node(P, N_LIT_NIL);
+        }
+        ast* n = parse_fn(P, 1);
         maybe_semi(P);
         return n;
     }
@@ -1488,6 +1650,15 @@ static ast* parse_stmt(parser* P) {
         n->as.while_stmt.cond = parse_expr(P);
         expect(P, TK_RPAREN, "expected ')'");
         n->as.while_stmt.body = parse_block(P);
+        return n;
+    }
+
+    if (accept(P, TK_YIELD)) {
+        ast* n = node(P, N_YIELD);
+        P->saw_yield = 1;
+        if (P->tok.type != TK_SEMI && P->tok.type != TK_RBRACE) n->as.yield_stmt.value = parse_expr(P);
+        else n->as.yield_stmt.value = NULL;
+        maybe_semi(P);
         return n;
     }
 
@@ -1581,7 +1752,6 @@ void ast_free(ast* node) {
             }
             free(node->as.switch_stmt.case_exprs);
             free(node->as.switch_stmt.case_blocks);
-            ast_free(node->as.switch_stmt.default_block);
             break;
         case N_MATCH:
             ast_free(node->as.match_expr.expr);
@@ -1630,6 +1800,24 @@ void ast_free(ast* node) {
             }
             free(node->as.class_stmt.methods);
             break;
+        case N_STRUCT:
+            free(node->as.struct_stmt.name);
+            for (size_t i = 0; i < node->as.struct_stmt.field_count; i++) {
+                free(node->as.struct_stmt.field_names[i]);
+                ast_free(node->as.struct_stmt.field_defaults[i]);
+            }
+            free(node->as.struct_stmt.field_names);
+            free(node->as.struct_stmt.field_defaults);
+            break;
+        case N_ENUM:
+            free(node->as.enum_stmt.name);
+            for (size_t i = 0; i < node->as.enum_stmt.count; i++) {
+                free(node->as.enum_stmt.names[i]);
+                ast_free(node->as.enum_stmt.values[i]);
+            }
+            free(node->as.enum_stmt.names);
+            free(node->as.enum_stmt.values);
+            break;
         case N_EXPORT_LIST:
             for (size_t i = 0; i < node->as.export_list.count; i++) {
                 free(node->as.export_list.local_names[i]);
@@ -1660,6 +1848,9 @@ void ast_free(ast* node) {
         case N_RETURN:
             ast_free(node->as.ret_stmt.value);
             break;
+        case N_YIELD:
+            ast_free(node->as.yield_stmt.value);
+            break;
         case N_EXPR_STMT:
             ast_free(node->as.expr_stmt.expr);
             break;
@@ -1680,6 +1871,9 @@ void ast_free(ast* node) {
             break;
         case N_UNOP:
             ast_free(node->as.unop.expr);
+            break;
+        case N_AWAIT:
+            ast_free(node->as.await_expr.expr);
             break;
         case N_RANGE:
             ast_free(node->as.range.left);

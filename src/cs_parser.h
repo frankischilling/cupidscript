@@ -29,9 +29,13 @@ typedef enum {
     N_EXPR_STMT,
     N_FNDEF,
     N_CLASS,
+    N_STRUCT,
+    N_ENUM,
+    N_YIELD,
 
     N_BINOP,
     N_UNOP,
+    N_AWAIT,
     N_RANGE,
     N_TERNARY,
     N_PIPE,
@@ -107,6 +111,22 @@ struct ast {
             size_t method_count;
         } class_stmt;
 
+        struct {
+            char* name;
+            char** field_names;
+            ast** field_defaults;
+            size_t field_count;
+        } struct_stmt;
+
+        struct {
+            char* name;
+            char** names;
+            ast** values;
+            size_t count;
+        } enum_stmt;
+
+        struct { ast* value; } yield_stmt;
+
         struct { ast* cond; ast* then_b; ast* else_b; } if_stmt;
         struct { ast* cond; ast* body; } while_stmt;
 
@@ -120,10 +140,13 @@ struct ast {
             size_t param_count;
             char* rest_param; // optional rest parameter name
             ast* body;
+            int is_async;
+            int is_generator;
         } fndef;
 
         struct { int op; ast* left; ast* right; } binop;
         struct { int op; ast* expr; } unop;
+        struct { ast* expr; } await_expr;
         struct { ast* left; ast* right; int inclusive; } range;
         struct { ast* cond; ast* then_e; ast* else_e; } ternary;
         struct { ast* left; ast* right; } pipe;
@@ -131,7 +154,7 @@ struct ast {
         struct { ast* callee; ast** args; size_t argc; } call;
         struct { ast* target; ast* index; } index;
         struct { ast* target; char* field; } getfield;
-        struct { char** params; ast** defaults; size_t param_count; char* rest_param; ast* body; } funclit;
+        struct { char** params; ast** defaults; size_t param_count; char* rest_param; ast* body; int is_async; int is_generator; } funclit;
         struct { ast** items; size_t count; } listlit;
         struct { ast** keys; ast** vals; size_t count; } maplit;
         struct { char** names; size_t count; char* rest_name; } list_pattern;
@@ -153,6 +176,7 @@ typedef struct {
     token tok;
     const char* source_name;
     char* error; // malloc'd error message or NULL
+    int saw_yield;
 } parser;
 
 void parser_init(parser* P, const char* src, const char* source_name);

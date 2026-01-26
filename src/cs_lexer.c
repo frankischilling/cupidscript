@@ -138,6 +138,11 @@ static token_type keyword_type(const char* s, size_t n) {
     if (n == 7 && memcmp(s, "finally", 7) == 0) return TK_FINALLY;
     if (n == 6 && memcmp(s, "export", 6) == 0) return TK_EXPORT;
     if (n == 5 && memcmp(s, "class", 5) == 0) return TK_CLASS;
+    if (n == 6 && memcmp(s, "struct", 6) == 0) return TK_STRUCT;
+    if (n == 4 && memcmp(s, "enum", 4) == 0) return TK_ENUM;
+    if (n == 5 && memcmp(s, "async", 5) == 0) return TK_ASYNC;
+    if (n == 5 && memcmp(s, "await", 5) == 0) return TK_AWAIT;
+    if (n == 5 && memcmp(s, "yield", 5) == 0) return TK_YIELD;
     if (n == 4 && memcmp(s, "self", 4) == 0) return TK_SELF;
     if (n == 5 && memcmp(s, "super", 5) == 0) return TK_SUPER;
     if (n == 4 && memcmp(s, "true", 4) == 0) return TK_TRUE;

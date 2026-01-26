@@ -27,6 +27,8 @@ struct cs_func {
     char* rest_param;        // optional rest parameter name
     ast* body;
     cs_env* closure;
+    int is_async;
+    int is_generator;
 };
 
 typedef struct cs_frame {
@@ -82,6 +84,11 @@ struct cs_vm {
     ast** asts;
     size_t ast_count;
     size_t ast_cap;
+
+    // Generator execution state (only active during generator calls)
+    struct cs_list_obj* yield_list;
+    int yield_active;
+    int yield_used;
 
     // GC auto-collect policy
     size_t gc_threshold;            // collect when tracked_count >= threshold; 0 = disabled

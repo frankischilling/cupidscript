@@ -353,6 +353,9 @@ cs_vm* cs_vm_new(void) {
     vm->exec_start_ms = 0;
     vm->exec_timeout_ms = 0;
     vm->interrupt_requested = 0;
+    vm->yield_list = NULL;
+    vm->yield_active = 0;
+    vm->yield_used = 0;
 
     return vm;
 }
@@ -998,6 +1001,18 @@ static int map_is_class(cs_value v) {
     return ok;
 }
 
+static int map_is_struct(cs_value v) {
+    if (v.type != CS_T_MAP) return 0;
+    cs_value flag = map_get_cstr(as_map(v), "__is_struct");
+    int ok = (flag.type == CS_T_BOOL && flag.as.b);
+    cs_value_release(flag);
+    if (ok) return 1;
+    if (map_has_cstr(as_map(v), "__fields")) return 1;
+    if (map_has_cstr(as_map(v), "__defaults")) return 1;
+    return 0;
+}
+
+
 static cs_value map_get_class(cs_value v) {
     if (v.type != CS_T_MAP) return cs_nil();
     return map_get_cstr(as_map(v), "__class");
@@ -1632,9 +1647,12 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
             f->params = e->as.funclit.params;
             f->defaults = e->as.funclit.defaults;
             f->param_count = e->as.funclit.param_count;
+            f->rest_param = e->as.funclit.rest_param;
             f->body = e->as.funclit.body;
             f->closure = env;
             env_incref(env);
+            f->is_async = e->as.funclit.is_async;
+            f->is_generator = e->as.funclit.is_generator;
 
             cs_value fv; fv.type = CS_T_FUNC; fv.as.p = f;
             return fv;
@@ -1664,14 +1682,15 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
                     cs_value_release(x);
                     return out;
                 }
-                cs_value_release(x);
-                vm_set_err(vm, "type error: unary '-' expects int or float", e->source_name, e->line, e->col);
-                *ok=0;
-                return cs_nil();
+                vm_set_err(vm, "unary '-' expects int or float", e->source_name, e->line, e->col);
+                *ok = 0;
             }
             cs_value_release(x);
-            vm_set_err(vm, "unknown unary operator", e->source_name, e->line, e->col);
-            *ok=0; return cs_nil();
+            return cs_nil();
+        }
+
+        case N_AWAIT: {
+            return eval_expr(vm, env, e->as.await_expr.expr, ok);
         }
 
         case N_TERNARY: {
@@ -1779,24 +1798,47 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
                         if (!bind_params_with_defaults(vm, callenv, fn, argc, argv, ok)) {
                             env_decref(callenv);
                         } else {
-                            exec_result r = exec_block(vm, callenv, fn->body);
-                            if (r.did_throw) {
-                                vm_set_pending_throw(vm, r.thrown);
-                                r.thrown = cs_nil();
+                            cs_value listv = cs_list(vm);
+                            cs_list_obj* yl = as_list(listv);
+                            if (!yl) {
+                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
                                 *ok = 0;
-                            } else if (r.did_break) {
-                                vm_set_err(vm, "break used outside of a loop", e->source_name, e->line, e->col);
-                                *ok = 0;
-                            } else if (r.did_continue) {
-                                vm_set_err(vm, "continue used outside of a loop", e->source_name, e->line, e->col);
-                                *ok = 0;
-                            } else if (!r.ok) {
-                                *ok = 0;
-                            } else if (r.did_return) {
-                                out = cs_value_copy(r.ret);
+                            } else {
+                                int prev_active = vm->yield_active;
+                                int prev_used = vm->yield_used;
+                                cs_list_obj* prev_list = vm->yield_list;
+                                vm->yield_active = 1;
+                                vm->yield_used = 0;
+                                vm->yield_list = yl;
+
+                                exec_result r = exec_block(vm, callenv, fn->body);
+
+                                int used = vm->yield_used;
+                                vm->yield_active = prev_active;
+                                vm->yield_used = prev_used;
+                                vm->yield_list = prev_list;
+
+                                if (r.did_throw) {
+                                    vm_set_pending_throw(vm, r.thrown);
+                                    r.thrown = cs_nil();
+                                    *ok = 0;
+                                } else if (r.did_break) {
+                                    vm_set_err(vm, "break used outside of a loop", e->source_name, e->line, e->col);
+                                    *ok = 0;
+                                } else if (r.did_continue) {
+                                    vm_set_err(vm, "continue used outside of a loop", e->source_name, e->line, e->col);
+                                    *ok = 0;
+                                } else if (!r.ok) {
+                                    *ok = 0;
+                                } else if (fn->is_generator || used) {
+                                    out = cs_value_copy(listv);
+                                } else if (r.did_return) {
+                                    out = cs_value_copy(r.ret);
+                                }
+                                cs_value_release(r.ret);
+                                cs_value_release(r.thrown);
                             }
-                            cs_value_release(r.ret);
-                            cs_value_release(r.thrown);
+                            cs_value_release(listv);
                         }
                     }
                     env_decref(callenv);
@@ -1852,6 +1894,59 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
                         if (*ok) out = cs_value_copy(instance);
                         cs_value_release(instance);
                     }
+                } else if (callee.type == CS_T_MAP && (map_is_struct(callee) || map_has_cstr(as_map(callee), "__is_struct") || map_has_cstr(as_map(callee), "__fields") || map_has_cstr(as_map(callee), "__defaults"))) {
+                    cs_value fields_v = map_get_cstr(as_map(callee), "__fields");
+                    cs_value defaults_v = map_get_cstr(as_map(callee), "__defaults");
+                    if (fields_v.type != CS_T_LIST || defaults_v.type != CS_T_LIST) {
+                        vm_set_err(vm, "invalid struct metadata", e->source_name, e->line, e->col);
+                        *ok = 0;
+                    } else {
+                        cs_list_obj* fl = as_list(fields_v);
+                        cs_list_obj* dl = as_list(defaults_v);
+                        size_t field_count = fl ? fl->len : 0;
+                        if ((size_t)argc > field_count) {
+                            vm_set_err(vm, "too many arguments for struct", e->source_name, e->line, e->col);
+                            *ok = 0;
+                        } else {
+                            cs_value instance = cs_map(vm);
+                            if (!instance.as.p) {
+                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else if (!map_set_cstr(as_map(instance), "__struct", callee)) {
+                                cs_value_release(instance);
+                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                cs_map_obj* im = as_map(instance);
+                                for (size_t i = 0; i < field_count; i++) {
+                                    cs_value namev = list_get(fl, (int64_t)i);
+                                    cs_value val = cs_nil();
+                                    int val_needs_release = 0;
+                                    if ((int)i < argc) {
+                                        val = argv[i];
+                                    } else if (dl && i < dl->len) {
+                                        val = list_get(dl, (int64_t)i);
+                                        val_needs_release = 1;
+                                    }
+                                    if (!map_set_value(im, namev, val)) {
+                                        if (val_needs_release) cs_value_release(val);
+                                        cs_value_release(namev);
+                                        cs_value_release(instance);
+                                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                        goto struct_done;
+                                    }
+                                    if (val_needs_release) cs_value_release(val);
+                                    cs_value_release(namev);
+                                }
+                                out = cs_value_copy(instance);
+                                cs_value_release(instance);
+                            }
+                        }
+                    }
+struct_done:
+                    cs_value_release(fields_v);
+                    cs_value_release(defaults_v);
                 } else {
                     vm_set_err(vm, "attempted to call non-function", e->source_name, e->line, e->col);
                     *ok = 0;
@@ -2704,25 +2799,50 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
                             env_decref(callenv);
                         } else {
                             vm_frames_push(vm, call_name ? call_name : (fn->name ? fn->name : "<fn>"), e->source_name, e->line, e->col);
-                            exec_result r = exec_block(vm, callenv, fn->body);
-                            if (r.did_throw) {
-                                vm_set_pending_throw(vm, r.thrown);
-                                r.thrown = cs_nil();
+                            cs_value listv = cs_list(vm);
+                            cs_list_obj* yl = as_list(listv);
+                            int did_throw = 0;
+                            if (!yl) {
+                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
                                 *ok = 0;
-                            } else if (r.did_break) {
-                                vm_set_err(vm, "break used outside of a loop", e->source_name, e->line, e->col);
-                                *ok = 0;
-                            } else if (r.did_continue) {
-                                vm_set_err(vm, "continue used outside of a loop", e->source_name, e->line, e->col);
-                                *ok = 0;
-                            } else if (!r.ok) {
-                                *ok = 0;
-                            } else if (r.did_return) {
-                                out = cs_value_copy(r.ret);
+                            } else {
+                                int prev_active = vm->yield_active;
+                                int prev_used = vm->yield_used;
+                                cs_list_obj* prev_list = vm->yield_list;
+                                vm->yield_active = 1;
+                                vm->yield_used = 0;
+                                vm->yield_list = yl;
+
+                                exec_result r = exec_block(vm, callenv, fn->body);
+
+                                int used = vm->yield_used;
+                                vm->yield_active = prev_active;
+                                vm->yield_used = prev_used;
+                                vm->yield_list = prev_list;
+
+                                if (r.did_throw) {
+                                    vm_set_pending_throw(vm, r.thrown);
+                                    r.thrown = cs_nil();
+                                    *ok = 0;
+                                } else if (r.did_break) {
+                                    vm_set_err(vm, "break used outside of a loop", e->source_name, e->line, e->col);
+                                    *ok = 0;
+                                } else if (r.did_continue) {
+                                    vm_set_err(vm, "continue used outside of a loop", e->source_name, e->line, e->col);
+                                    *ok = 0;
+                                } else if (!r.ok) {
+                                    *ok = 0;
+                                } else if (fn->is_generator || used) {
+                                    out = cs_value_copy(listv);
+                                } else if (r.did_return) {
+                                    out = cs_value_copy(r.ret);
+                                }
+                                did_throw = r.did_throw;
+                                cs_value_release(r.ret);
+                                cs_value_release(r.thrown);
                             }
-                            cs_value_release(r.ret);
-                            cs_value_release(r.thrown);
-                            if (!r.did_throw) vm_frames_pop(vm);
+                            cs_value_release(listv);
+                            if (!did_throw) vm_frames_pop(vm);
                         }
                     }
                     env_decref(callenv);
@@ -2780,6 +2900,59 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
                         if (*ok) out = cs_value_copy(instance);
                         cs_value_release(instance);
                     }
+                } else if (callee.type == CS_T_MAP && (map_is_struct(callee) || map_has_cstr(as_map(callee), "__is_struct") || map_has_cstr(as_map(callee), "__fields") || map_has_cstr(as_map(callee), "__defaults"))) {
+                    cs_value fields_v = map_get_cstr(as_map(callee), "__fields");
+                    cs_value defaults_v = map_get_cstr(as_map(callee), "__defaults");
+                    if (fields_v.type != CS_T_LIST || defaults_v.type != CS_T_LIST) {
+                        vm_set_err(vm, "invalid struct metadata", e->source_name, e->line, e->col);
+                        *ok = 0;
+                    } else {
+                        cs_list_obj* fl = as_list(fields_v);
+                        cs_list_obj* dl = as_list(defaults_v);
+                        size_t field_count = fl ? fl->len : 0;
+                        if ((size_t)argc > field_count) {
+                            vm_set_err(vm, "too many arguments for struct", e->source_name, e->line, e->col);
+                            *ok = 0;
+                        } else {
+                            cs_value instance = cs_map(vm);
+                            if (!instance.as.p) {
+                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else if (!map_set_cstr(as_map(instance), "__struct", callee)) {
+                                cs_value_release(instance);
+                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                cs_map_obj* im = as_map(instance);
+                                for (size_t i = 0; i < field_count; i++) {
+                                    cs_value namev = list_get(fl, (int64_t)i);
+                                    cs_value val = cs_nil();
+                                    int val_needs_release = 0;
+                                    if ((int)i < argc) {
+                                        val = argv[i];
+                                    } else if (dl && i < dl->len) {
+                                        val = list_get(dl, (int64_t)i);
+                                        val_needs_release = 1;
+                                    }
+                                    if (!map_set_value(im, namev, val)) {
+                                        if (val_needs_release) cs_value_release(val);
+                                        cs_value_release(namev);
+                                        cs_value_release(instance);
+                                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                        goto struct_done_call;
+                                    }
+                                    if (val_needs_release) cs_value_release(val);
+                                    cs_value_release(namev);
+                                }
+                                out = cs_value_copy(instance);
+                                cs_value_release(instance);
+                            }
+                        }
+                    }
+struct_done_call:
+                    cs_value_release(fields_v);
+                    cs_value_release(defaults_v);
                 } else {
                     vm_set_err(vm, "attempted to call non-function", e->source_name, e->line, e->col);
                     *ok = 0;
@@ -3170,9 +3343,15 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                 return r;
             }
 
-            int matched = 0;
-            for (size_t i = 0; i < s->as.switch_stmt.case_count && !matched; i++) {
-                cs_value cv = eval_expr(vm, env, s->as.switch_stmt.case_exprs[i], &ok);
+            int match_index = -1;
+            int default_index = -1;
+            for (size_t i = 0; i < s->as.switch_stmt.case_count; i++) {
+                ast* cexpr = s->as.switch_stmt.case_exprs[i];
+                if (!cexpr) {
+                    default_index = (int)i;
+                    continue;
+                }
+                cs_value cv = eval_expr(vm, env, cexpr, &ok);
                 if (!ok) {
                     cs_value_release(sw);
                     if (exec_take_vm_throw(vm, &r)) return r;
@@ -3180,23 +3359,23 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                     return r;
                 }
 
-                matched = vm_value_equals(sw, cv);
+                if (vm_value_equals(sw, cv)) {
+                    match_index = (int)i;
+                    cs_value_release(cv);
+                    break;
+                }
                 cs_value_release(cv);
+            }
 
-                if (matched) {
+            int start = match_index >= 0 ? match_index : default_index;
+            if (start >= 0) {
+                for (size_t i = (size_t)start; i < s->as.switch_stmt.case_count; i++) {
                     r = exec_stmt(vm, env, s->as.switch_stmt.case_blocks[i]);
                     if (r.did_break) {
                         r.did_break = 0; // break exits switch
+                        break;
                     }
-                    cs_value_release(sw);
-                    return r;
-                }
-            }
-
-            if (!matched && s->as.switch_stmt.default_block) {
-                r = exec_stmt(vm, env, s->as.switch_stmt.default_block);
-                if (r.did_break) {
-                    r.did_break = 0; // break exits switch
+                    if (r.did_return || r.did_continue || r.did_throw || !r.ok) break;
                 }
             }
 
@@ -3218,6 +3397,8 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
             f->rest_param = s->as.fndef.rest_param;
             f->body = s->as.fndef.body;
             f->closure = env;
+            f->is_async = s->as.fndef.is_async;
+            f->is_generator = s->as.fndef.is_generator;
             env_incref(env);
 
             cs_value fv; fv.type = CS_T_FUNC; fv.as.p = f;
@@ -3280,6 +3461,8 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                 f->rest_param = m->as.fndef.rest_param;
                 f->body = m->as.fndef.body;
                 f->closure = env;
+                f->is_async = m->as.fndef.is_async;
+                f->is_generator = m->as.fndef.is_generator;
                 env_incref(env);
                 cs_value fv; fv.type = CS_T_FUNC; fv.as.p = f;
                 map_set_cstr(cm, f->name ? f->name : "<method>", fv);
@@ -3287,6 +3470,139 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
 
             env_set_here(env, s->as.class_stmt.name, cv);
             cs_value_release(cv);
+            return r;
+        }
+
+        case N_STRUCT: {
+            cs_value sv = cs_map(vm);
+            if (!sv.as.p) { vm_set_err(vm, "out of memory", s->source_name, s->line, s->col); r.ok = 0; return r; }
+            cs_map_obj* sm = as_map(sv);
+
+            if (!map_set_cstr(sm, "__is_struct", cs_bool(1))) {
+                cs_value_release(sv);
+                vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                r.ok = 0;
+                return r;
+            }
+
+            cs_value namev = cs_str(vm, s->as.struct_stmt.name ? s->as.struct_stmt.name : "<struct>");
+            map_set_cstr(sm, "__name", namev);
+            cs_value_release(namev);
+
+            cs_value fields = cs_list(vm);
+            cs_value defaults = cs_list(vm);
+            if (!fields.as.p || !defaults.as.p) {
+                cs_value_release(fields);
+                cs_value_release(defaults);
+                cs_value_release(sv);
+                vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                r.ok = 0;
+                return r;
+            }
+
+            cs_list_obj* fl = as_list(fields);
+            cs_list_obj* dl = as_list(defaults);
+            for (size_t i = 0; i < s->as.struct_stmt.field_count; i++) {
+                const char* fname = s->as.struct_stmt.field_names[i];
+                cs_value fnv = cs_str(vm, fname ? fname : "");
+                if (!list_push(fl, fnv)) {
+                    cs_value_release(fnv);
+                    cs_value_release(fields);
+                    cs_value_release(defaults);
+                    cs_value_release(sv);
+                    vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                    r.ok = 0;
+                    return r;
+                }
+                cs_value_release(fnv);
+
+                cs_value dv = cs_nil();
+                if (s->as.struct_stmt.field_defaults && s->as.struct_stmt.field_defaults[i]) {
+                    int ok = 1;
+                    dv = eval_expr(vm, env, s->as.struct_stmt.field_defaults[i], &ok);
+                    if (!ok) {
+                        cs_value_release(fields);
+                        cs_value_release(defaults);
+                        cs_value_release(sv);
+                        if (exec_take_vm_throw(vm, &r)) return r;
+                        r.ok = 0;
+                        return r;
+                    }
+                }
+                if (!list_push(dl, dv)) {
+                    cs_value_release(dv);
+                    cs_value_release(fields);
+                    cs_value_release(defaults);
+                    cs_value_release(sv);
+                    vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                    r.ok = 0;
+                    return r;
+                }
+                cs_value_release(dv);
+            }
+
+            map_set_cstr(sm, "__fields", fields);
+            map_set_cstr(sm, "__defaults", defaults);
+            cs_value_release(fields);
+            cs_value_release(defaults);
+
+            env_set_here(env, s->as.struct_stmt.name, sv);
+            cs_value_release(sv);
+            return r;
+        }
+
+        case N_ENUM: {
+            cs_value ev = cs_map(vm);
+            if (!ev.as.p) { vm_set_err(vm, "out of memory", s->source_name, s->line, s->col); r.ok = 0; return r; }
+            cs_map_obj* em = as_map(ev);
+
+            if (!map_set_cstr(em, "__is_enum", cs_bool(1))) {
+                cs_value_release(ev);
+                vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                r.ok = 0;
+                return r;
+            }
+
+            cs_value namev = cs_str(vm, s->as.enum_stmt.name ? s->as.enum_stmt.name : "<enum>");
+            map_set_cstr(em, "__name", namev);
+            cs_value_release(namev);
+
+            long long cur = 0;
+            for (size_t i = 0; i < s->as.enum_stmt.count; i++) {
+                if (s->as.enum_stmt.values && s->as.enum_stmt.values[i]) {
+                    int ok = 1;
+                    cs_value vv = eval_expr(vm, env, s->as.enum_stmt.values[i], &ok);
+                    if (!ok) {
+                        cs_value_release(ev);
+                        if (exec_take_vm_throw(vm, &r)) return r;
+                        r.ok = 0;
+                        return r;
+                    }
+                    if (vv.type != CS_T_INT) {
+                        cs_value_release(vv);
+                        cs_value_release(ev);
+                        vm_set_err(vm, "enum value must be int", s->source_name, s->line, s->col);
+                        r.ok = 0;
+                        return r;
+                    }
+                    cur = vv.as.i;
+                    cs_value_release(vv);
+                }
+
+                cs_value iv = cs_int(cur);
+                if (!map_set_cstr(em, s->as.enum_stmt.names[i], iv)) {
+                    cs_value_release(iv);
+                    cs_value_release(ev);
+                    vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                    r.ok = 0;
+                    return r;
+                }
+                cs_value_release(iv);
+                cur++;
+            }
+
+            env_set_here(env, s->as.enum_stmt.name, ev);
+            cs_value_release(ev);
             return r;
         }
 
@@ -3334,6 +3650,33 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                     continue;
                 }
             }
+            return r;
+        }
+
+        case N_YIELD: {
+            if (!vm->yield_active || !vm->yield_list) {
+                vm_set_err(vm, "yield used outside of generator", s->source_name, s->line, s->col);
+                r.ok = 0;
+                return r;
+            }
+            cs_value v = cs_nil();
+            if (s->as.yield_stmt.value) {
+                int ok = 1;
+                v = eval_expr(vm, env, s->as.yield_stmt.value, &ok);
+                if (!ok) {
+                    if (exec_take_vm_throw(vm, &r)) return r;
+                    r.ok = 0;
+                    return r;
+                }
+            }
+            if (!list_push(vm->yield_list, v)) {
+                cs_value_release(v);
+                vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                r.ok = 0;
+                return r;
+            }
+            vm->yield_used = 1;
+            cs_value_release(v);
             return r;
         }
 
