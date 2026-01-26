@@ -5,7 +5,7 @@ let resp = await http_get("https://httpbin.org/get");
 
 print("Status:", resp.status, resp.status_text);
 print("Headers:");
-for (k in keys(resp.headers)) {
+for k in keys(resp.headers) {
     print("  ", k, ":", mget(resp.headers, k));
 }
 print("Body:", substr(resp.body, 0, 200), "...");
