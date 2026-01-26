@@ -75,6 +75,11 @@ See `Standard-Library.md` for:
 * `str_find`
 * `str_replace`
 * `str_split`
+* `str_contains`
+* `str_count`
+* `str_pad_start`
+* `str_pad_end`
+* `str_reverse`
 * `substr`
 * `join`
 * `to_str`
@@ -122,11 +127,21 @@ print(str_startswith("hello.txt", "world"));  // false
 
 * `str_repeat(s, count)` - Repeat string N times
 * `split_lines(s)` - Split into lines on `\n` or `\r\n`
+* `str_contains(s, sub)` - Substring check
+* `str_count(s, sub)` - Count occurrences
+* `str_pad_start(s, width, pad)` - Left pad
+* `str_pad_end(s, width, pad)` - Right pad
+* `str_reverse(s)` - Reverse bytes
 
 ```c
 print(str_repeat("abc", 3));  // "abcabcabc"
 print(str_repeat("x", 5));    // "xxxxx"
 print(split_lines("a\n b\r\n")); // ["a", " b", ""]
+print(str_contains("hello", "ell")); // true
+print(str_count("banana", "na"));    // 2
+print(str_pad_start("7", 4, "0"));   // "0007"
+print(str_pad_end("7", 4, "0"));     // "7000"
+print(str_reverse("Cupid"));          // "dipuC" (byte-wise)
 ```
 
 ## strbuf (string builder)

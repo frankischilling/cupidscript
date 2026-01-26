@@ -11,7 +11,7 @@ Prints values separated by spaces and ends with newline.
 ### `typeof(value) -> string`
 
 Returns one of:
-`"nil" "bool" "int" "float" "string" "list" "map" "strbuf" "function" "native"`
+`"nil" "bool" "int" "float" "string" "list" "map" "strbuf" "function" "native" "promise"`
 
 ### Type Predicates
 
@@ -25,6 +25,7 @@ Boolean type-checking functions:
 * `is_list(value) -> bool`
 * `is_map(value) -> bool`
 * `is_function(value) -> bool`
+* `is_promise(value) -> bool`
 
 Example:
 
@@ -179,6 +180,66 @@ fn desc(a, b) { return b - a; }
 sort(xs, desc, "quick");
 ```
 
+### `enumerate(list) -> list`
+
+Returns a list of `[index, value]` pairs.
+
+```c
+let xs = ["a", "b"];
+print(enumerate(xs)); // [[0, "a"], [1, "b"]]
+```
+
+### `zip(listA, listB) -> list`
+
+Pairs elements by index up to the shorter list length.
+
+```c
+print(zip([1, 2], ["x", "y", "z"])); // [[1, "x"], [2, "y"]]
+```
+
+### `any(list, [pred]) -> bool`
+
+Returns `true` if any element is truthy (or satisfies `pred`).
+
+```c
+any([nil, 0, 3]) // true
+any([1, 3, 5], fn(x) => x % 2 == 0) // false
+```
+
+### `all(list, [pred]) -> bool`
+
+Returns `true` if all elements are truthy (or satisfy `pred`).
+
+```c
+all([1, 2, 3]) // true
+all([1, 2, 3], fn(x) => x < 3) // false
+```
+
+### `filter(list, pred) -> list`
+
+Returns a new list with elements that satisfy `pred`.
+
+```c
+filter([1, 2, 3, 4], fn(x) => x % 2 == 0) // [2, 4]
+```
+
+### `map(list, mapper) -> list`
+
+Returns a new list with `mapper` applied to each element.
+
+```c
+map([1, 2, 3], fn(x) => x * 2) // [2, 4, 6]
+```
+
+### `reduce(list, reducer, [init]) -> value`
+
+Reduces a list left-to-right. If `init` is omitted, uses the first element.
+
+```c
+reduce([1, 2, 3], fn(a, b) => a + b) // 6
+reduce([1, 2, 3], fn(a, b) => a + b, 10) // 16
+```
+
 ### `insert(list, index: int, value)`
 
 Inserts `value` at position `index`, shifting existing elements.
@@ -287,6 +348,70 @@ Splits on a string separator.
 
 * If `sep` is empty, returns `[s]`.
 
+### `str_contains(s: string, sub: string) -> bool`
+
+Returns `true` if `sub` appears anywhere in `s`.
+
+### `str_count(s: string, sub: string) -> int`
+
+Counts non-overlapping occurrences of `sub`. If `sub` is empty, returns 0.
+
+### `str_pad_start(s: string, width: int, pad: string = " ") -> string`
+
+Pads on the left until `width` is reached.
+
+### `str_pad_end(s: string, width: int, pad: string = " ") -> string`
+
+Pads on the right until `width` is reached.
+
+### `str_reverse(s: string) -> string`
+
+Returns the reversed string (byte-wise).
+
+### Regex
+
+Regex uses POSIX Extended Regular Expressions (ERE). Invalid patterns raise a runtime error. On Windows builds, regex functions may be unavailable.
+
+#### `regex_is_match(pattern: string, text: string) -> bool`
+
+Returns `true` if any match is found.
+
+#### `regex_match(pattern: string, text: string) -> bool`
+
+Returns `true` only if the *entire* string matches.
+
+#### `regex_find(pattern: string, text: string) -> map | nil`
+
+Returns a match object or `nil` if no match:
+
+* `start` (int) - byte index of match start
+* `end` (int) - byte index of match end
+* `match` (string) - matched text
+* `groups` (list) - capture groups (`nil` for unmatched groups)
+
+#### `regex_find_all(pattern: string, text: string) -> list[map]`
+
+Returns a list of match objects with the same shape as `regex_find`.
+
+#### `regex_replace(pattern: string, text: string, replacement: string) -> string`
+
+Replaces all matches with a literal replacement string. Capture expansion (like `$1`) is not supported.
+
+Example:
+
+```c
+let text = "foo-123-bar";
+print(regex_is_match("[0-9]+", text));
+
+let m = regex_find("([0-9]+)", text);
+print(m.start, m.end, m["match"], m.groups[0]);
+
+let all = regex_find_all("[0-9]+", "a1 b22 c333");
+print(len(all));
+
+print(regex_replace("[0-9]+", "a1b22c", "#"));
+```
+
 ### `substr(s: string, start: int, length: int) -> string`
 
 Returns substring starting at `start` with `length` characters.
@@ -294,6 +419,28 @@ Returns substring starting at `start` with `length` characters.
 ### `join(list, separator: string) -> string`
 
 Joins list elements into a string with the given separator.
+
+## List Utilities
+
+### `list_unique(list) -> list`
+
+Returns a new list with duplicates removed (preserves order).
+
+### `list_flatten(list) -> list`
+
+Flattens one level of nested lists.
+
+### `list_chunk(list, size: int) -> list[list]`
+
+Splits into sublists of at most `size` elements.
+
+### `list_compact(list) -> list`
+
+Removes `nil` values.
+
+### `list_sum(list) -> int | float | nil`
+
+Sums numeric elements (ignores `nil`). Returns `nil` if any non-number is present.
 
 ### String Ergonomics
 
@@ -357,6 +504,47 @@ Joins with `/` when needed.
 Returns directory portion:
 
 * no slash → `.`
+
+## Date / Time
+
+### `unix_ms() -> int`
+
+Returns the current Unix time in milliseconds.
+
+### `unix_s() -> int`
+
+Returns the current Unix time in seconds.
+
+### `datetime_now() -> map`
+
+Returns local time as a map with fields:
+
+* `year`, `month`, `day`
+* `hour`, `minute`, `second`, `ms`
+* `wday` (0=Sunday), `yday` (1-366)
+* `is_dst` (bool), `is_utc` (bool)
+
+### `datetime_utc() -> map`
+
+Same as `datetime_now()` but in UTC (`is_utc = true`).
+
+### `datetime_from_unix_ms(ms: int|float) -> map`
+
+Converts a Unix milliseconds timestamp to local time.
+
+### `datetime_from_unix_ms_utc(ms: int|float) -> map`
+
+Converts a Unix milliseconds timestamp to UTC.
+
+Example:
+
+```c
+let ms = unix_ms();
+let local = datetime_now();
+let utc = datetime_utc();
+let epoch = datetime_from_unix_ms_utc(0);
+print(ms, local, utc, epoch);
+```
 * `/x` → `/`
 * `a/b` → `a`
 
@@ -470,10 +658,31 @@ Milliseconds timestamp:
 
 ### `sleep(ms: int)`
 
-Sleeps that many milliseconds:
+Returns a promise that resolves after `ms` milliseconds.
 
-* POSIX: `nanosleep`
-* Windows: currently errors ("not supported in stdlib")
+```c
+await sleep(10);
+```
+
+If `ms <= 0`, the promise resolves immediately.
+
+## Promises
+
+### `promise() -> promise`
+
+Creates a new pending promise.
+
+### `resolve(promise, value = nil) -> bool`
+
+Resolves a promise. Returns `true` if it was pending.
+
+### `reject(promise, value = nil) -> bool`
+
+Rejects a promise. Returns `true` if it was pending.
+
+### `is_promise(value) -> bool`
+
+Checks if a value is a promise.
 
 ## Math Functions
 
@@ -618,4 +827,102 @@ if (get_instruction_count() > get_instruction_limit() / 2) {
     print("Warning: approaching instruction limit");
     set_instruction_limit(get_instruction_limit() * 2);
 }
+```
+
+## Network I/O
+
+### TCP Sockets
+
+```c
+// Connect to a server
+let sock = await tcp_connect("example.com", 80);
+
+// Send data
+await socket_send(sock, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+
+// Receive data
+let response = await socket_recv(sock, 4096);
+
+// Close socket
+socket_close(sock);
+```
+
+### TCP Server
+
+```c
+let server = tcp_listen("0.0.0.0", 8080);
+print("Listening on port 8080...");
+
+let client = await socket_accept(server);
+let data = await socket_recv(client, 1024);
+await socket_send(client, "HTTP/1.1 200 OK\r\n\r\nHello!");
+socket_close(client);
+socket_close(server);
+```
+
+### TLS/SSL Connections
+
+```c
+// Connect with TLS
+let sock = tls_connect("example.com", 443);
+
+// Check if secure
+print(socket_is_secure(sock));  // true
+
+// Get TLS info
+let info = tls_info(sock);
+print(info.version);   // "TLSv1.3"
+print(info.cipher);    // "TLS_AES_256_GCM_SHA384"
+
+// Upgrade existing connection (STARTTLS)
+let smtp = tcp_connect("smtp.example.com", 587);
+socket_send(smtp, "STARTTLS\r\n");
+tls_upgrade(smtp);  // Now encrypted
+
+socket_close(sock);
+```
+
+### HTTP/HTTPS Client
+
+```c
+// HTTP request
+let resp = http_get("http://example.com");
+
+// HTTPS request (automatic TLS)
+let resp = http_get("https://api.example.com/data");
+print(resp.status);  // 200
+print(resp.body);
+
+// POST request
+let resp = http_post("https://api.example.com/data", json_stringify({key: "value"}));
+
+// Full control
+let resp = http_request({
+  method: "PUT",
+  url: "https://api.example.com/users/1",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer token123"
+  },
+  body: json_stringify({name: "bob"}),
+  timeout: 10000,
+  follow_redirects: true,
+  verify_ssl: true  // default, set false to skip cert verification
+});
+```
+
+### URL Utilities
+
+```c
+let parts = url_parse("http://user:pass@example.com:8080/path?q=1");
+// {scheme: "http", user: "user", pass: "pass", host: "example.com", port: 8080, path: "/path", query: "q=1"}
+
+let url = url_build({scheme: "https", host: "api.example.com", path: "/v1/users"});
+// "https://api.example.com/v1/users"
+```
+
+### Configuration
+
+```c
+net_set_default_timeout(60000);  // 60 second default timeout
 ```

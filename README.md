@@ -20,6 +20,19 @@ make
 bin/cupidscript examples/features.cs
 ```
 
+## Dependencies
+
+TLS/HTTPS support requires OpenSSL development libraries.
+
+- **Linux (Debian/Ubuntu):** `libssl-dev`
+- **Linux (Fedora/RHEL):** `openssl-devel`
+
+To build without TLS, set `CS_NO_TLS=1`:
+
+```sh
+make CS_NO_TLS=1
+```
+
 ## Tests
 
 Tests are plain `.cs` scripts under `tests/` that use the stdlib `assert(...)` function.
@@ -109,6 +122,9 @@ fn greet(name, greeting = "Hello") {
   return greeting + ", " + name + "!";
 }
 
+async fn add(a, b) { return a + b; }
+let sum = await add(2, 3);
+
 if (cond) { ... } else { ... }
 while (cond) { ... }
 for x in expr { ... }           // for-in over lists/maps
@@ -121,6 +137,16 @@ throw expr;
 try { ... } catch (e) { ... } finally { ... }
 export name = expr; // module exports
 switch (expr) { case 1 { ... } default { ... } }
+
+// structs + enums
+struct Point { x, y = 0 }
+enum Color { Red, Green = 5, Blue }
+
+// generators
+fn range(n) {
+  let i = 0;
+  while (i < n) { yield i; i += 1; }
+}
 
 // classes
 class File {
@@ -139,15 +165,22 @@ Assignment rule (intentional): `let` creates new variables; plain assignment (`x
 ### Expressions
 
 - Operators with precedence: `||`, `&&`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `%`, unary `!`, unary `-`
+- Operators with precedence: `||`, `&&`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `%`, unary `!`, unary `-`, nullish `??`
 - Pipe operator: `|>` (passes left value into the right call, supports `_` placeholder)
 - Range operators: `start..end` (exclusive), `start..=end` (inclusive)
 - Ternary: `cond ? a : b`
+- Optional chaining: `obj?.field`
 - Strings: `"..."` with escapes `\n`, `\t`, `\r`, `\"`, `\\`
 - Integers: decimal (`123`), hex (`0xFF`), underscores (`1_000_000`)
 - Floats: decimal with dot (`3.14`), scientific notation (`1.5e-3`, `2e10`)
 - Literals: list (`[1, 2, "hi"]`), map (`{ "a": 1, "b": 2 }`)
 - Spread in literals: `[0, ...xs]`, `{...m1, ...m2}`
 - Dynamic values: `nil`, `true/false`, integers, floats, strings, functions, native functions, lists, maps, strbuf
+- Dynamic values: `nil`, `true/false`, integers, floats, strings, functions, native functions, lists, maps, strbuf
+- Structs: fixed-field maps with positional construction
+- Enums: named integer constants stored in a map
+- Generators: functions that use `yield` and return a list of yielded values
+- Async/Await: `async` functions and `await` (currently synchronous execution)
 
 Notes:
 - `+` supports `int + int`, `float + float`, mixed arithmetic (int+float→float), and string concatenation (if either operand is a string).
@@ -201,7 +234,7 @@ Map keys can be any value; equality follows the same rules as `==` (so `1` and `
 
 Stdlib provides:
 - `load("file.cs")`: executes another script file every time it’s called
-- `require("file.cs")`: executes a file once per VM and returns its `exports` map- `require_optional("file.cs")`: like `require`, but returns `nil` if file doesn't exist (no error)
+- `require("file.cs")`: executes a file once per VM and returns its `exports` map
 - `require_optional("file.cs")`: like `require`, but returns `nil` if file doesn't exist (no error)
 - `cwd()` / `chdir(path)` to inspect or change the VM's current directory
 

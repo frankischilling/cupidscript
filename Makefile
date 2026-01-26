@@ -1,6 +1,14 @@
 CC      := gcc
 CFLAGS  := -std=c99 -Wall -Wextra -O2 -g -D_POSIX_C_SOURCE=200809L
 LDFLAGS ?=
+
+# OpenSSL support (can disable with CS_NO_TLS=1)
+ifndef CS_NO_TLS
+	CFLAGS += $(shell pkg-config --cflags openssl 2>/dev/null)
+	LDFLAGS += $(shell pkg-config --libs openssl 2>/dev/null || echo "-lssl -lcrypto")
+else
+	CFLAGS += -DCS_NO_TLS
+endif
 DEPFLAGS ?= -MMD -MP
 AR      := ar
 ARFLAGS := rcs
@@ -9,7 +17,7 @@ SRCDIR  := src
 OBJDIR  := obj
 BINDIR  := bin
 
-CS_SRCS := cs_value.c cs_lexer.c cs_parser.c cs_vm.c cs_stdlib.c
+CS_SRCS := cs_value.c cs_lexer.c cs_parser.c cs_vm.c cs_stdlib.c cs_event_loop.c cs_net.c cs_tls.c cs_http.c
 CS_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(CS_SRCS))
 
 CLI_SRCS := main.c

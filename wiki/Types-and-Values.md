@@ -64,6 +64,14 @@ Mutable string builder object.
 
 * Has method-like calls: `sb.append(x)`, `sb.str()`, `sb.clear()`, `sb.len()`
 
+### `promise`
+
+Promise values represent pending asynchronous results:
+
+* Created by `async` function calls, `sleep(ms)`, or `promise()`
+* Resolved or rejected by the scheduler or `resolve`/`reject`
+* `await` blocks until a promise resolves and throws on rejection
+
 ## Mutability
 
 * Lists and maps are mutable.

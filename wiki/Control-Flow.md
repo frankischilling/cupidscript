@@ -196,8 +196,29 @@ Rules:
 
 * `switch` evaluates `expr` once, then compares against each `case` value in order.
 * Supported matching is easiest/most common with `int`, `string`, `bool`, and `nil`.
-* **Non-fallthrough:** once a case matches, its block runs and the `switch` is finished.
-* `default` (optional) runs if no case matches.
+* **Fallthrough:** once a case matches, execution continues into subsequent cases until a `break` is hit or the switch ends.
+* `break;` exits the `switch` (without leaving an outer loop).
+* `default` (optional) can appear anywhere. If no case matches, execution starts at `default` and falls through to the following cases.
+
+Pattern cases (no guards) are supported:
+
+* List destructuring: `case [a, b, ...rest] { ... }`
+* Map destructuring: `case {x, y: yy} { ... }`
+* Type pattern: `case int(x) { ... }`
+
+Type patterns match built-in types (`nil`, `bool`, `int`, `float`, `string`, `list`, `map`, `strbuf`, `range`, `function`, `native`, `promise`).
+If a class or struct name is in scope, `case ClassName(x)` or `case StructName(x)` matches instances and binds `x`.
+
+Example:
+
+```c
+let out = [];
+switch (x) {
+  case 1 { push(out, "one"); }
+  case 2 { push(out, "two"); break; }
+  default { push(out, "other"); }
+}
+```
 
 ## `defer`
 
@@ -234,6 +255,7 @@ Pattern syntax:
 let out = match (value) {
   case [a, b]: a + b;              // list pattern (binds a, b)
   case {x, y: z}: x + z;           // map pattern (keys x, y; binds y to z)
+  case int(n): n + 1;              // type pattern (binds n)
   case _ : "anything";            // wildcard
   case n if n > 10: "big";        // guard (optional)
   default: "other";

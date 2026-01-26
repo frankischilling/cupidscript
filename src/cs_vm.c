@@ -1,4 +1,5 @@
 #include "cs_vm.h"
+#include "cs_event_loop.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -366,6 +367,9 @@ cs_vm* cs_vm_new(void) {
     vm->task_head = NULL;
     vm->task_tail = NULL;
     vm->timers = NULL;
+    vm->pending_io = NULL;
+    vm->pending_io_count = 0;
+    vm->net_default_timeout_ms = 30000;
 
     return vm;
 }
@@ -1441,6 +1445,21 @@ static int scheduler_wait_and_run(cs_vm* vm, ast* e, int* ok) {
     if (scheduler_run_due_timers(vm)) return 1;
     if (scheduler_run_one_task(vm, e, ok)) return 1;
 
+    if (vm->pending_io_count > 0) {
+        int timeout = 100;
+        if (vm->timers) {
+            uint64_t now = get_time_ms();
+            uint64_t due = vm->timers->due_ms;
+            if (due <= now) timeout = 0;
+            else {
+                uint64_t delta = due - now;
+                if (delta < (uint64_t)timeout) timeout = (int)delta;
+            }
+        }
+        cs_poll_pending_io(vm, timeout);
+        return 1;
+    }
+
     if (vm->timers) {
         uint64_t now = get_time_ms();
         uint64_t due = vm->timers->due_ms;
@@ -1497,6 +1516,13 @@ static cs_value await_promise(cs_vm* vm, cs_promise_obj* p, ast* e, int* ok) {
         return cs_nil();
     }
     return cs_nil();
+}
+
+cs_value cs_wait_promise(cs_vm* vm, cs_value promise, int* ok) {
+    if (!ok) return cs_nil();
+    if (promise.type != CS_T_PROMISE) return cs_value_copy(promise);
+    cs_promise_obj* p = as_promise(promise);
+    return await_promise(vm, p, NULL, ok);
 }
 
 static cs_value schedule_async_call(cs_vm* vm, struct cs_func* fn, int argc, cs_value* argv, cs_env* bound_env, ast* e, int* ok) {
@@ -4747,6 +4773,13 @@ void cs_vm_free(cs_vm* vm) {
         promise_decref(t->promise);
         free(t);
     }
+    while (vm->pending_io) {
+        cs_pending_io* io = vm->pending_io;
+        vm->pending_io = io->next;
+        cs_value_release(io->promise);
+        cs_value_release(io->context);
+        free(io);
+    }
     env_decref(vm->globals);
     free(vm->last_error);
     cs_value_release(vm->pending_thrown);
@@ -5113,6 +5146,21 @@ static int module_add(cs_vm* vm, const char* path, cs_value exports) {
         if (!nm) return 0;
         vm->modules = nm;
         vm->module_cap = nc;
+
+        if (vm->pending_io_count > 0) {
+            int timeout = 100;
+            if (vm->timers) {
+                uint64_t now = get_time_ms();
+                uint64_t due = vm->timers->due_ms;
+                if (due <= now) timeout = 0;
+                else {
+                    uint64_t delta = due - now;
+                    if (delta < (uint64_t)timeout) timeout = (int)delta;
+                }
+            }
+            cs_poll_pending_io(vm, timeout);
+            return 1;
+        }
     }
     vm->modules[vm->module_count].path = cs_strdup2(path);
     if (!vm->modules[vm->module_count].path) return 0;

@@ -25,7 +25,7 @@ print("sum:", add(xs[0], xs[1]));
 
 ### Keywords
 
-`let`, `fn`, `if`, `else`, `while`, `switch`, `case`, `default`, `for`, `in`, `break`, `continue`, `return`, `throw`, `try`, `catch`, `true`, `false`, `nil`
+`let`, `const`, `fn`, `class`, `self`, `super`, `if`, `else`, `while`, `switch`, `case`, `default`, `for`, `in`, `break`, `continue`, `return`, `throw`, `try`, `catch`, `finally`, `defer`, `match`, `import`, `export`, `true`, `false`, `nil`
 
 ### Expressions
 
@@ -38,7 +38,10 @@ print("sum:", add(xs[0], xs[1]));
 * Calls: `f(a, b)`
 * Indexing: `xs[0]`, `m["key"]`
 * Field access: `obj.field` (maps) + dotted global fallback
-* Function literals: `fn(a, b) { ... }`
+* Function literals: `fn(a, b) { ... }`, `fn(a, b) => expr`
+* Defaults: `fn greet(name, greeting = "Hello") { ... }`
+* Spread: `[0, ...xs]`, `{...m1, ...m2}`, `f(...xs)`
+* Pipe: `value |> f()` (supports `_` placeholder)
 
 ### Statements
 
@@ -55,6 +58,7 @@ print("sum:", add(xs[0], xs[1]));
 * `try { ... } catch (e) { ... }`
 * `return expr;`
 * `expr;` (expression statement)
+* `class Name { ... }` (optionally `: Parent`)
 
 ## Wiki Pages
 
@@ -63,6 +67,7 @@ print("sum:", add(xs[0], xs[1]));
 * [Types & Values](Types-and-Values)
 * [Control Flow](Control-Flow)
 * [Functions & Closures](Functions-and-Closures)
+* [Classes & Inheritance](Classes-and-Inheritance)
 * [Collections (list/map)](Collections)
 * [Strings & strbuf](Strings-and-Strbuf)
 * [Standard Library](Standard-Library)

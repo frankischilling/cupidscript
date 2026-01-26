@@ -82,6 +82,16 @@ extend(xs, ys); // appends all elements of ys into xs
 
 ```c
 let i = index_of(xs, 123); // returns index or -1
+
+### Utilities
+
+```c
+list_unique(xs)   // remove duplicates (preserve order)
+list_flatten(xs)  // flatten one level
+list_chunk(xs, 2) // [[...], ...]
+list_compact(xs)  // remove nils
+list_sum(xs)      // sum numbers (nil ignored)
+```
 ```
 
 ### Sort
@@ -191,6 +201,25 @@ let m = {"a": 1, "b": 2, "c": 3};
 for v in map_values(m) {
   print("Value:", v);
 }
+```
+
+### Iteration Helpers
+
+```c
+let xs = [1, 2, 3];
+print(enumerate(xs)); // [[0,1], [1,2], [2,3]]
+
+print(zip(["a", "b"], [10, 20, 30])); // [["a",10], ["b",20]]
+
+fn is_even(x) { return x % 2 == 0; }
+print(any(xs, is_even)); // true
+print(all(xs, is_even)); // false
+
+print(filter(xs, is_even)); // [2]
+print(map(xs, fn(x) => x * 2)); // [2, 4, 6]
+
+fn sum(a, b) { return a + b; }
+print(reduce(xs, sum)); // 6
 ```
 
 ## Data Quality-of-Life Functions

@@ -1,4 +1,7 @@
 #include "cs_vm.h"
+#include "cs_net.h"
+#include "cs_tls.h"
+#include "cs_http.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +10,9 @@
 #include <time.h>
 #include <math.h>
 #include <errno.h>
+#if !defined(_WIN32)
+#include <regex.h>
+#endif
 #if defined(_WIN32)
 #include <windows.h>
 #include <direct.h>
@@ -18,17 +24,129 @@
 #include <unistd.h>
 #endif
 
+// ---------- Date/Time helpers ----------
+static int64_t wall_clock_ms(void) {
+#if !defined(_WIN32)
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) != 0) return 0;
+    return (int64_t)tv.tv_sec * 1000 + (int64_t)(tv.tv_usec / 1000);
+#else
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    const uint64_t EPOCH_100NS = 116444736000000000ULL; // 1601->1970
+    if (uli.QuadPart < EPOCH_100NS) return 0;
+    return (int64_t)((uli.QuadPart - EPOCH_100NS) / 10000ULL);
+#endif
+}
+
+static int tm_local_from_time(time_t sec, struct tm* out) {
+#if defined(_WIN32)
+    return localtime_s(out, &sec) == 0;
+#else
+    return localtime_r(&sec, out) != NULL;
+#endif
+}
+
+static int tm_utc_from_time(time_t sec, struct tm* out) {
+#if defined(_WIN32)
+    return gmtime_s(out, &sec) == 0;
+#else
+    return gmtime_r(&sec, out) != NULL;
+#endif
+}
+
+static cs_value datetime_map_from_tm(cs_vm* vm, const struct tm* t, int ms, int is_utc) {
+    cs_value m = cs_map(vm);
+    if (!m.as.p) { cs_error(vm, "out of memory"); return cs_nil(); }
+    cs_map_set(m, "year", cs_int((int64_t)t->tm_year + 1900));
+    cs_map_set(m, "month", cs_int((int64_t)t->tm_mon + 1));
+    cs_map_set(m, "day", cs_int((int64_t)t->tm_mday));
+    cs_map_set(m, "hour", cs_int((int64_t)t->tm_hour));
+    cs_map_set(m, "minute", cs_int((int64_t)t->tm_min));
+    cs_map_set(m, "second", cs_int((int64_t)t->tm_sec));
+    cs_map_set(m, "ms", cs_int((int64_t)ms));
+    cs_map_set(m, "wday", cs_int((int64_t)t->tm_wday));
+    cs_map_set(m, "yday", cs_int((int64_t)t->tm_yday + 1));
+    cs_map_set(m, "is_dst", cs_bool(t->tm_isdst > 0));
+    cs_map_set(m, "is_utc", cs_bool(is_utc));
+    return m;
+}
+
+static int nf_unix_ms(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud; (void)argc; (void)argv;
+    if (!out) return 0;
+    *out = cs_int((int64_t)wall_clock_ms());
+    return 0;
+}
+
+static int nf_unix_s(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud; (void)argc; (void)argv;
+    if (!out) return 0;
+    *out = cs_int((int64_t)time(NULL));
+    return 0;
+}
+
+static int nf_datetime_now(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud; (void)argc; (void)argv;
+    if (!out) return 0;
+    int64_t ms = wall_clock_ms();
+    time_t sec = (time_t)(ms / 1000);
+    int rem = (int)(ms % 1000);
+    if (rem < 0) { rem += 1000; sec -= 1; }
+    struct tm t;
+    if (!tm_local_from_time(sec, &t)) { *out = cs_nil(); return 0; }
+    *out = datetime_map_from_tm(vm, &t, rem, 0);
+    return 0;
+}
+
+static int nf_datetime_utc(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud; (void)argc; (void)argv;
+    if (!out) return 0;
+    int64_t ms = wall_clock_ms();
+    time_t sec = (time_t)(ms / 1000);
+    int rem = (int)(ms % 1000);
+    if (rem < 0) { rem += 1000; sec -= 1; }
+    struct tm t;
+    if (!tm_utc_from_time(sec, &t)) { *out = cs_nil(); return 0; }
+    *out = datetime_map_from_tm(vm, &t, rem, 1);
+    return 0;
+}
+
+static int nf_datetime_from_unix_ms(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || (argv[0].type != CS_T_INT && argv[0].type != CS_T_FLOAT)) { *out = cs_nil(); return 0; }
+    int64_t ms = (argv[0].type == CS_T_INT) ? argv[0].as.i : (int64_t)argv[0].as.f;
+    time_t sec = (time_t)(ms / 1000);
+    int rem = (int)(ms % 1000);
+    if (rem < 0) { rem += 1000; sec -= 1; }
+    struct tm t;
+    if (!tm_local_from_time(sec, &t)) { *out = cs_nil(); return 0; }
+    *out = datetime_map_from_tm(vm, &t, rem, 0);
+    return 0;
+}
+
+static int nf_datetime_from_unix_ms_utc(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || (argv[0].type != CS_T_INT && argv[0].type != CS_T_FLOAT)) { *out = cs_nil(); return 0; }
+    int64_t ms = (argv[0].type == CS_T_INT) ? argv[0].as.i : (int64_t)argv[0].as.f;
+    time_t sec = (time_t)(ms / 1000);
+    int rem = (int)(ms % 1000);
+    if (rem < 0) { rem += 1000; sec -= 1; }
+    struct tm t;
+    if (!tm_utc_from_time(sec, &t)) { *out = cs_nil(); return 0; }
+    *out = datetime_map_from_tm(vm, &t, rem, 1);
+    return 0;
+}
+
 // Forward declarations
 static int nf_error(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out);
 static int nf_format_error(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out);
 static int cs_value_equals(const cs_value* a, const cs_value* b);
-static uint64_t stdlib_now_ms(void);
-
-static inline void prof_string_op(cs_vm* vm, uint64_t start_ms) {
-    if (!vm) return;
-    vm->prof_string_ops++;
-    vm->prof_string_ms += (stdlib_now_ms() - start_ms);
-}
 
 static char* cs_strdup2_local(const char* s) {
     size_t n = strlen(s ? s : "");
@@ -678,13 +796,11 @@ static int nf_str_find(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_v
     (void)vm; (void)ud;
     if (!out) return 0;
     if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_int(-1); return 0; }
-    uint64_t prof_start = stdlib_now_ms();
     const char* s = ((cs_string*)argv[0].as.p)->data;
     const char* sub = ((cs_string*)argv[1].as.p)->data;
     const char* p = strstr(s, sub);
-    if (!p) { *out = cs_int(-1); prof_string_op(vm, prof_start); return 0; }
+    if (!p) { *out = cs_int(-1); return 0; }
     *out = cs_int((int64_t)(p - s));
-    prof_string_op(vm, prof_start);
     return 0;
 }
 
@@ -692,36 +808,12 @@ static int nf_str_replace(cs_vm* vm, void* ud, int argc, const cs_value* argv, c
     (void)ud;
     if (!out) return 0;
     if (argc != 3 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR || argv[2].type != CS_T_STR) { *out = cs_nil(); return 0; }
-    uint64_t prof_start = stdlib_now_ms();
-    const cs_string* sstr = (const cs_string*)argv[0].as.p;
-    const cs_string* oldstr = (const cs_string*)argv[1].as.p;
-    const cs_string* repstr = (const cs_string*)argv[2].as.p;
-    const char* s = sstr ? sstr->data : "";
-    const char* old = oldstr ? oldstr->data : "";
-    const char* rep = repstr ? repstr->data : "";
-    size_t sl = sstr ? sstr->len : strlen(s);
-    size_t ol = oldstr ? oldstr->len : strlen(old);
-    size_t rl = repstr ? repstr->len : strlen(rep);
+    const char* s = ((cs_string*)argv[0].as.p)->data;
+    const char* old = ((cs_string*)argv[1].as.p)->data;
+    const char* rep = ((cs_string*)argv[2].as.p)->data;
+    if (!*old) { *out = cs_str(vm, s); return 0; }
 
-    if (ol == 0) { *out = cs_value_copy(argv[0]); prof_string_op(vm, prof_start); return 0; }
-    if (ol == rl && memcmp(old, rep, ol) == 0) { *out = cs_value_copy(argv[0]); prof_string_op(vm, prof_start); return 0; }
-
-    // Fast path: no match
-    if (!strstr(s, old)) { *out = cs_value_copy(argv[0]); prof_string_op(vm, prof_start); return 0; }
-
-    // Fast path: single-char replace
-    if (ol == 1 && rl == 1) {
-        char* buf = (char*)malloc(sl + 1);
-        if (!buf) { cs_error(vm, "out of memory"); return 1; }
-        const char oldc = old[0];
-        const char repc = rep[0];
-        for (size_t i = 0; i < sl; i++) buf[i] = (s[i] == oldc) ? repc : s[i];
-        buf[sl] = 0;
-        *out = cs_str_take(vm, buf, (uint64_t)sl);
-        prof_string_op(vm, prof_start);
-        return 0;
-    }
-
+    size_t sl = strlen(s), ol = strlen(old), rl = strlen(rep);
     size_t count = 0;
     for (const char* p = s; (p = strstr(p, old)); p += ol) count++;
     size_t nl = sl;
@@ -747,7 +839,6 @@ static int nf_str_replace(cs_vm* vm, void* ud, int argc, const cs_value* argv, c
     w += tail;
     buf[w] = 0;
     *out = cs_str_take(vm, buf, (uint64_t)w);
-    prof_string_op(vm, prof_start);
     return 0;
 }
 
@@ -755,7 +846,6 @@ static int nf_str_split(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
     (void)ud;
     if (!out) return 0;
     if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_list(vm); return 0; }
-    uint64_t prof_start = stdlib_now_ms();
     const char* s = ((cs_string*)argv[0].as.p)->data;
     const char* sep = ((cs_string*)argv[1].as.p)->data;
     if (!*sep) { // return [s]
@@ -765,7 +855,6 @@ static int nf_str_split(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
         if (!list_ensure(l, 1)) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
         l->items[l->len++] = cs_value_copy(argv[0]);
         *out = listv;
-        prof_string_op(vm, prof_start);
         return 0;
     }
 
@@ -793,9 +882,416 @@ static int nf_str_split(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
     l->items[l->len++] = tailv;
 
     *out = listv;
-    prof_string_op(vm, prof_start);
     return 0;
 }
+
+static int nf_str_contains(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+    const char* s = ((cs_string*)argv[0].as.p)->data;
+    const char* sub = ((cs_string*)argv[1].as.p)->data;
+    *out = cs_bool(strstr(s, sub) != NULL);
+    return 0;
+}
+
+static int nf_str_count(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_int(0); return 0; }
+    const char* s = ((cs_string*)argv[0].as.p)->data;
+    const char* sub = ((cs_string*)argv[1].as.p)->data;
+    if (!*sub) { *out = cs_int(0); return 0; }
+    size_t count = 0;
+    size_t subl = strlen(sub);
+    const char* p = s;
+    while ((p = strstr(p, sub)) != NULL) {
+        count++;
+        p += subl;
+    }
+    *out = cs_int((int64_t)count);
+    return 0;
+}
+
+static int nf_str_pad_start(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 2 || argc > 3 || argv[0].type != CS_T_STR || argv[1].type != CS_T_INT) { *out = cs_nil(); return 0; }
+    const char* s = ((cs_string*)argv[0].as.p)->data;
+    size_t sl = ((cs_string*)argv[0].as.p)->len;
+    int64_t width = argv[1].as.i;
+    const char* pad = " ";
+    size_t padl = 1;
+    if (argc == 3 && argv[2].type == CS_T_STR) {
+        pad = ((cs_string*)argv[2].as.p)->data;
+        padl = ((cs_string*)argv[2].as.p)->len;
+    }
+    if (width <= (int64_t)sl || padl == 0) { *out = cs_str(vm, s); return 0; }
+    size_t need = (size_t)width - sl;
+    size_t total = need + sl;
+    char* buf = (char*)malloc(total + 1);
+    if (!buf) { cs_error(vm, "out of memory"); return 1; }
+    size_t w = 0;
+    while (need > 0) {
+        size_t n = padl < need ? padl : need;
+        memcpy(buf + w, pad, n);
+        w += n;
+        need -= n;
+    }
+    memcpy(buf + w, s, sl);
+    w += sl;
+    buf[w] = 0;
+    *out = cs_str_take(vm, buf, (uint64_t)w);
+    return 0;
+}
+
+static int nf_str_pad_end(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 2 || argc > 3 || argv[0].type != CS_T_STR || argv[1].type != CS_T_INT) { *out = cs_nil(); return 0; }
+    const char* s = ((cs_string*)argv[0].as.p)->data;
+    size_t sl = ((cs_string*)argv[0].as.p)->len;
+    int64_t width = argv[1].as.i;
+    const char* pad = " ";
+    size_t padl = 1;
+    if (argc == 3 && argv[2].type == CS_T_STR) {
+        pad = ((cs_string*)argv[2].as.p)->data;
+        padl = ((cs_string*)argv[2].as.p)->len;
+    }
+    if (width <= (int64_t)sl || padl == 0) { *out = cs_str(vm, s); return 0; }
+    size_t need = (size_t)width - sl;
+    size_t total = need + sl;
+    char* buf = (char*)malloc(total + 1);
+    if (!buf) { cs_error(vm, "out of memory"); return 1; }
+    size_t w = 0;
+    memcpy(buf + w, s, sl);
+    w += sl;
+    while (need > 0) {
+        size_t n = padl < need ? padl : need;
+        memcpy(buf + w, pad, n);
+        w += n;
+        need -= n;
+    }
+    buf[w] = 0;
+    *out = cs_str_take(vm, buf, (uint64_t)w);
+    return 0;
+}
+
+static int nf_str_reverse(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_nil(); return 0; }
+    cs_string* st = (cs_string*)argv[0].as.p;
+    size_t sl = st->len;
+    char* buf = (char*)malloc(sl + 1);
+    if (!buf) { cs_error(vm, "out of memory"); return 1; }
+    for (size_t i = 0; i < sl; i++) {
+        buf[i] = st->data[sl - 1 - i];
+    }
+    buf[sl] = 0;
+    *out = cs_str_take(vm, buf, (uint64_t)sl);
+    return 0;
+}
+
+#if !defined(_WIN32)
+static int regex_compile_or_error(cs_vm* vm, regex_t* re, const char* pattern) {
+    if (!re) return 0;
+    int rc = regcomp(re, pattern ? pattern : "", REG_EXTENDED);
+    if (rc == 0) return 1;
+    size_t need = regerror(rc, re, NULL, 0);
+    char* buf = (char*)malloc(need + 16);
+    if (!buf) { cs_error(vm, "regex error"); return 0; }
+    regerror(rc, re, buf, need);
+    cs_error(vm, buf);
+    free(buf);
+    return 0;
+}
+
+static cs_value cs_str_slice_range(cs_vm* vm, const char* s, size_t start, size_t end) {
+    if (!s || end < start) return cs_str(vm, "");
+    size_t len = end - start;
+    char* buf = (char*)malloc(len + 1);
+    if (!buf) return cs_nil();
+    memcpy(buf, s + start, len);
+    buf[len] = 0;
+    return cs_str_take(vm, buf, (uint64_t)len);
+}
+
+static int regex_buf_append(char** buf, size_t* len, size_t* cap, const char* s, size_t n) {
+    if (!s || n == 0) return 1;
+    size_t need = *len + n + 1;
+    if (need > *cap) {
+        size_t nc = *cap ? *cap : 64;
+        while (nc < need) nc *= 2;
+        char* nb = (char*)realloc(*buf, nc);
+        if (!nb) return 0;
+        *buf = nb;
+        *cap = nc;
+    }
+    memcpy(*buf + *len, s, n);
+    *len += n;
+    (*buf)[*len] = 0;
+    return 1;
+}
+
+static cs_value regex_match_map(cs_vm* vm, const char* text, size_t offset, regmatch_t* matches, size_t nmatch) {
+    if (!matches || nmatch == 0 || matches[0].rm_so < 0) return cs_nil();
+    size_t start = offset + (size_t)matches[0].rm_so;
+    size_t end = offset + (size_t)matches[0].rm_eo;
+    cs_value mapv = cs_map(vm);
+    if (!mapv.as.p) { cs_error(vm, "out of memory"); return cs_nil(); }
+
+    cs_value matchv = cs_str_slice_range(vm, text, start, end);
+    cs_value groups = cs_list(vm);
+    if (!groups.as.p || matchv.type == CS_T_NIL) {
+        cs_value_release(matchv);
+        cs_value_release(groups);
+        cs_value_release(mapv);
+        cs_error(vm, "out of memory");
+        return cs_nil();
+    }
+
+    for (size_t i = 1; i < nmatch; i++) {
+        if (matches[i].rm_so < 0 || matches[i].rm_eo < 0) {
+            if (cs_list_push(groups, cs_nil()) != 0) {
+                cs_value_release(matchv);
+                cs_value_release(groups);
+                cs_value_release(mapv);
+                cs_error(vm, "out of memory");
+                return cs_nil();
+            }
+            continue;
+        }
+        size_t gs = offset + (size_t)matches[i].rm_so;
+        size_t ge = offset + (size_t)matches[i].rm_eo;
+        cs_value gv = cs_str_slice_range(vm, text, gs, ge);
+        if (gv.type == CS_T_NIL || cs_list_push(groups, gv) != 0) {
+            cs_value_release(gv);
+            cs_value_release(matchv);
+            cs_value_release(groups);
+            cs_value_release(mapv);
+            cs_error(vm, "out of memory");
+            return cs_nil();
+        }
+        cs_value_release(gv);
+    }
+
+    cs_map_set(mapv, "start", cs_int((int64_t)start));
+    cs_map_set(mapv, "end", cs_int((int64_t)end));
+    cs_map_set(mapv, "match", matchv);
+    cs_map_set(mapv, "groups", groups);
+    cs_value_release(matchv);
+    cs_value_release(groups);
+    return mapv;
+}
+
+static int nf_regex_is_match(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+    const char* pattern = cs_to_cstr(argv[0]);
+    const char* text = cs_to_cstr(argv[1]);
+    regex_t re;
+    if (!regex_compile_or_error(vm, &re, pattern)) return 1;
+    regmatch_t m;
+    int rc = regexec(&re, text, 1, &m, 0);
+    regfree(&re);
+    *out = cs_bool(rc == 0);
+    return 0;
+}
+
+static int nf_regex_match(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_bool(0); return 0; }
+    const char* pattern = cs_to_cstr(argv[0]);
+    const char* text = cs_to_cstr(argv[1]);
+    regex_t re;
+    if (!regex_compile_or_error(vm, &re, pattern)) return 1;
+    regmatch_t m;
+    int rc = regexec(&re, text, 1, &m, 0);
+    regfree(&re);
+    if (rc != 0) { *out = cs_bool(0); return 0; }
+    size_t len = strlen(text);
+    *out = cs_bool(m.rm_so == 0 && (size_t)m.rm_eo == len);
+    return 0;
+}
+
+static int nf_regex_find(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_nil(); return 0; }
+    const char* pattern = cs_to_cstr(argv[0]);
+    const char* text = cs_to_cstr(argv[1]);
+    regex_t re;
+    if (!regex_compile_or_error(vm, &re, pattern)) return 1;
+    size_t nmatch = (size_t)re.re_nsub + 1;
+    regmatch_t* matches = (regmatch_t*)calloc(nmatch, sizeof(regmatch_t));
+    if (!matches) { regfree(&re); cs_error(vm, "out of memory"); return 1; }
+    int rc = regexec(&re, text, nmatch, matches, 0);
+    if (rc != 0) {
+        free(matches);
+        regfree(&re);
+        *out = cs_nil();
+        return 0;
+    }
+    cs_value mv = regex_match_map(vm, text, 0, matches, nmatch);
+    free(matches);
+    regfree(&re);
+    if (mv.type == CS_T_NIL) return 1;
+    *out = mv;
+    return 0;
+}
+
+static int nf_regex_find_all(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) { *out = cs_list(vm); return 0; }
+    const char* pattern = cs_to_cstr(argv[0]);
+    const char* text = cs_to_cstr(argv[1]);
+    regex_t re;
+    if (!regex_compile_or_error(vm, &re, pattern)) return 1;
+    size_t nmatch = (size_t)re.re_nsub + 1;
+    regmatch_t* matches = (regmatch_t*)calloc(nmatch, sizeof(regmatch_t));
+    if (!matches) { regfree(&re); cs_error(vm, "out of memory"); return 1; }
+
+    cs_value listv = cs_list(vm);
+    if (!listv.as.p) { free(matches); regfree(&re); cs_error(vm, "out of memory"); return 1; }
+
+    size_t text_len = strlen(text);
+    size_t offset = 0;
+    while (offset <= text_len) {
+        const char* sub = text + offset;
+        int rc = regexec(&re, sub, nmatch, matches, 0);
+        if (rc != 0 || matches[0].rm_so < 0) break;
+
+        cs_value mv = regex_match_map(vm, text, offset, matches, nmatch);
+        if (mv.type == CS_T_NIL || cs_list_push(listv, mv) != 0) {
+            cs_value_release(mv);
+            cs_value_release(listv);
+            free(matches);
+            regfree(&re);
+            cs_error(vm, "out of memory");
+            return 1;
+        }
+        cs_value_release(mv);
+
+        size_t mstart = offset + (size_t)matches[0].rm_so;
+        size_t mend = offset + (size_t)matches[0].rm_eo;
+        if (mend == mstart) {
+            if (mend >= text_len) break;
+            offset = mend + 1;
+        } else {
+            offset = mend;
+        }
+    }
+
+    free(matches);
+    regfree(&re);
+    *out = listv;
+    return 0;
+}
+
+static int nf_regex_replace(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 3 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR || argv[2].type != CS_T_STR) {
+        *out = cs_nil();
+        return 0;
+    }
+    const char* pattern = cs_to_cstr(argv[0]);
+    const char* text = cs_to_cstr(argv[1]);
+    const char* repl = cs_to_cstr(argv[2]);
+    regex_t re;
+    if (!regex_compile_or_error(vm, &re, pattern)) return 1;
+    size_t nmatch = (size_t)re.re_nsub + 1;
+    regmatch_t* matches = (regmatch_t*)calloc(nmatch, sizeof(regmatch_t));
+    if (!matches) { regfree(&re); cs_error(vm, "out of memory"); return 1; }
+
+    char* buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    size_t text_len = strlen(text);
+    size_t offset = 0;
+    size_t last = 0;
+
+    while (offset <= text_len) {
+        const char* sub = text + offset;
+        int rc = regexec(&re, sub, nmatch, matches, 0);
+        if (rc != 0 || matches[0].rm_so < 0) break;
+        size_t mstart = offset + (size_t)matches[0].rm_so;
+        size_t mend = offset + (size_t)matches[0].rm_eo;
+
+        if (mstart > last) {
+            if (!regex_buf_append(&buf, &len, &cap, text + last, mstart - last)) {
+                free(buf);
+                free(matches);
+                regfree(&re);
+                cs_error(vm, "out of memory");
+                return 1;
+            }
+        }
+        if (!regex_buf_append(&buf, &len, &cap, repl, strlen(repl))) {
+            free(buf);
+            free(matches);
+            regfree(&re);
+            cs_error(vm, "out of memory");
+            return 1;
+        }
+
+        last = mend;
+        if (mend == mstart) {
+            if (mend >= text_len) break;
+            offset = mend + 1;
+        } else {
+            offset = mend;
+        }
+    }
+
+    if (last < text_len) {
+        if (!regex_buf_append(&buf, &len, &cap, text + last, text_len - last)) {
+            free(buf);
+            free(matches);
+            regfree(&re);
+            cs_error(vm, "out of memory");
+            return 1;
+        }
+    }
+
+    free(matches);
+    regfree(&re);
+
+    if (!buf) {
+        *out = cs_str(vm, "");
+        return 0;
+    }
+    *out = cs_str_take(vm, buf, (uint64_t)len);
+    return 0;
+}
+#else
+static int nf_regex_is_match(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud; (void)argc; (void)argv;
+    if (out) *out = cs_bool(0);
+    cs_error(vm, "regex not supported on this platform");
+    return 1;
+}
+
+static int nf_regex_match(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    return nf_regex_is_match(vm, ud, argc, argv, out);
+}
+
+static int nf_regex_find(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    return nf_regex_is_match(vm, ud, argc, argv, out);
+}
+
+static int nf_regex_find_all(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    return nf_regex_is_match(vm, ud, argc, argv, out);
+}
+
+static int nf_regex_replace(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    return nf_regex_is_match(vm, ud, argc, argv, out);
+}
+#endif
 
 static int nf_path_join(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
     (void)ud;
@@ -1598,6 +2094,153 @@ static int nf_is_promise(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs
     return 0;
 }
 
+// Native function: await_all(promises) -> promise<list>
+static int nf_await_all(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    cs_value result_list = cs_list(vm);
+    if (argc < 1 || argv[0].type != CS_T_LIST) {
+        cs_value p = cs_promise_new(vm);
+        cs_promise_resolve(vm, p, result_list);
+        *out = p;
+        cs_value_release(result_list);
+        return 0;
+    }
+
+    cs_list_obj* l = (cs_list_obj*)argv[0].as.p;
+    int ok = 1;
+    for (size_t i = 0; i < l->len; i++) {
+        cs_value v = l->items[i];
+        if (v.type == CS_T_PROMISE) {
+            cs_value awaited = cs_wait_promise(vm, v, &ok);
+            if (!ok) {
+                cs_value_release(awaited);
+                return 1;
+            }
+            cs_list_push(result_list, awaited);
+            cs_value_release(awaited);
+        } else {
+            cs_list_push(result_list, v);
+        }
+    }
+
+    cs_value p = cs_promise_new(vm);
+    cs_promise_resolve(vm, p, result_list);
+    *out = p;
+    cs_value_release(result_list);
+    return 0;
+}
+
+// Native function: await_any(promises) -> promise<T>
+static int nf_await_any(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1 || argv[0].type != CS_T_LIST) {
+        cs_value p = cs_promise_new(vm);
+        cs_promise_resolve(vm, p, cs_nil());
+        *out = p;
+        return 0;
+    }
+
+    cs_list_obj* l = (cs_list_obj*)argv[0].as.p;
+    int ok = 1;
+    for (size_t i = 0; i < l->len; i++) {
+        cs_value v = l->items[i];
+        if (v.type == CS_T_PROMISE) {
+            cs_value awaited = cs_wait_promise(vm, v, &ok);
+            if (!ok) {
+                cs_value_release(awaited);
+                return 1;
+            }
+            cs_value p = cs_promise_new(vm);
+            cs_promise_resolve(vm, p, awaited);
+            *out = p;
+            cs_value_release(awaited);
+            return 0;
+        } else {
+            cs_value p = cs_promise_new(vm);
+            cs_promise_resolve(vm, p, v);
+            *out = p;
+            return 0;
+        }
+    }
+
+    cs_value p = cs_promise_new(vm);
+    cs_promise_resolve(vm, p, cs_nil());
+    *out = p;
+    return 0;
+}
+
+// Native function: await_all_settled(promises) -> promise<list>
+static int nf_await_all_settled(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    cs_value result_list = cs_list(vm);
+    if (argc < 1 || argv[0].type != CS_T_LIST) {
+        cs_value p = cs_promise_new(vm);
+        cs_promise_resolve(vm, p, result_list);
+        *out = p;
+        cs_value_release(result_list);
+        return 0;
+    }
+
+    cs_list_obj* l = (cs_list_obj*)argv[0].as.p;
+    int ok = 1;
+    for (size_t i = 0; i < l->len; i++) {
+        cs_value entry = cs_map(vm);
+        cs_value v = l->items[i];
+        if (v.type == CS_T_PROMISE) {
+            cs_value awaited = cs_wait_promise(vm, v, &ok);
+            if (!ok) {
+                cs_value_release(awaited);
+                return 1;
+            }
+            cs_map_set(entry, "status", cs_str(vm, "fulfilled"));
+            cs_map_set(entry, "value", awaited);
+            cs_value_release(awaited);
+        } else {
+            cs_map_set(entry, "status", cs_str(vm, "fulfilled"));
+            cs_map_set(entry, "value", v);
+        }
+        cs_list_push(result_list, entry);
+        cs_value_release(entry);
+    }
+
+    cs_value p = cs_promise_new(vm);
+    cs_promise_resolve(vm, p, result_list);
+    *out = p;
+    cs_value_release(result_list);
+    return 0;
+}
+
+// Native function: timeout(promise, ms) -> promise
+static int nf_timeout(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 2 || argv[0].type != CS_T_PROMISE || argv[1].type != CS_T_INT) {
+        *out = cs_promise_new(vm);
+        cs_promise_resolve(vm, *out, cs_nil());
+        return 0;
+    }
+    int64_t ms = argv[1].as.i;
+    if (ms <= 0) {
+        *out = argv[0];
+        return 0;
+    }
+
+    int ok = 1;
+    cs_value awaited = cs_wait_promise(vm, argv[0], &ok);
+    if (!ok) {
+        cs_value_release(awaited);
+        return 1;
+    }
+    cs_value p = cs_promise_new(vm);
+    cs_promise_resolve(vm, p, awaited);
+    *out = p;
+    cs_value_release(awaited);
+    return 0;
+}
+
 static int nf_values(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
     (void)ud;
     if (!out) return 0;
@@ -2333,7 +2976,6 @@ static int nf_str_trim(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_v
     (void)ud;
     if (!out) return 0;
     if (argc < 1 || argv[0].type != CS_T_STR) { cs_error(vm, "str_trim() requires a string argument"); return 1; }
-    uint64_t prof_start = stdlib_now_ms();
     
     const char* s = cs_to_cstr(argv[0]);
     while (*s && isspace((unsigned char)*s)) s++;
@@ -2346,9 +2988,9 @@ static int nf_str_trim(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_v
     if (!trimmed) { cs_error(vm, "out of memory"); return 1; }
     memcpy(trimmed, s, len);
     trimmed[len] = '\0';
-
-    *out = cs_str_take(vm, trimmed, (uint64_t)len);
-    prof_string_op(vm, prof_start);
+    
+    *out = cs_str(vm, trimmed);
+    free(trimmed);
     return 0;
 }
 
@@ -2356,13 +2998,11 @@ static int nf_str_ltrim(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
     (void)ud;
     if (!out) return 0;
     if (argc < 1 || argv[0].type != CS_T_STR) { cs_error(vm, "str_ltrim() requires a string argument"); return 1; }
-    uint64_t prof_start = stdlib_now_ms();
     
     const char* s = cs_to_cstr(argv[0]);
     while (*s && isspace((unsigned char)*s)) s++;
     
     *out = cs_str(vm, s);
-    prof_string_op(vm, prof_start);
     return 0;
 }
 
@@ -2370,7 +3010,6 @@ static int nf_str_rtrim(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
     (void)ud;
     if (!out) return 0;
     if (argc < 1 || argv[0].type != CS_T_STR) { cs_error(vm, "str_rtrim() requires a string argument"); return 1; }
-    uint64_t prof_start = stdlib_now_ms();
     
     const char* s = cs_to_cstr(argv[0]);
     const char* end = s + strlen(s);
@@ -2381,9 +3020,9 @@ static int nf_str_rtrim(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
     if (!trimmed) { cs_error(vm, "out of memory"); return 1; }
     memcpy(trimmed, s, len);
     trimmed[len] = '\0';
-
-    *out = cs_str_take(vm, trimmed, (uint64_t)len);
-    prof_string_op(vm, prof_start);
+    
+    *out = cs_str(vm, trimmed);
+    free(trimmed);
     return 0;
 }
 
@@ -2391,7 +3030,6 @@ static int nf_str_lower(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
     (void)ud;
     if (!out) return 0;
     if (argc < 1 || argv[0].type != CS_T_STR) { cs_error(vm, "str_lower() requires a string argument"); return 1; }
-    uint64_t prof_start = stdlib_now_ms();
     
     const char* s = cs_to_cstr(argv[0]);
     size_t len = strlen(s);
@@ -2402,9 +3040,9 @@ static int nf_str_lower(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
         lower[i] = (char)tolower((unsigned char)s[i]);
     }
     lower[len] = '\0';
-
-    *out = cs_str_take(vm, lower, (uint64_t)len);
-    prof_string_op(vm, prof_start);
+    
+    *out = cs_str(vm, lower);
+    free(lower);
     return 0;
 }
 
@@ -2412,7 +3050,6 @@ static int nf_str_upper(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
     (void)ud;
     if (!out) return 0;
     if (argc < 1 || argv[0].type != CS_T_STR) { cs_error(vm, "str_upper() requires a string argument"); return 1; }
-    uint64_t prof_start = stdlib_now_ms();
     
     const char* s = cs_to_cstr(argv[0]);
     size_t len = strlen(s);
@@ -2423,9 +3060,9 @@ static int nf_str_upper(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
         upper[i] = (char)toupper((unsigned char)s[i]);
     }
     upper[len] = '\0';
-
-    *out = cs_str_take(vm, upper, (uint64_t)len);
-    prof_string_op(vm, prof_start);
+    
+    *out = cs_str(vm, upper);
+    free(upper);
     return 0;
 }
 
@@ -2436,14 +3073,12 @@ static int nf_str_startswith(cs_vm* vm, void* ud, int argc, const cs_value* argv
         cs_error(vm, "str_startswith() requires 2 string arguments"); 
         return 1; 
     }
-    uint64_t prof_start = stdlib_now_ms();
     
     const char* s = cs_to_cstr(argv[0]);
     const char* prefix = cs_to_cstr(argv[1]);
     size_t prefix_len = strlen(prefix);
     
     *out = cs_bool(strncmp(s, prefix, prefix_len) == 0);
-    prof_string_op(vm, prof_start);
     return 0;
 }
 
@@ -2454,7 +3089,6 @@ static int nf_str_endswith(cs_vm* vm, void* ud, int argc, const cs_value* argv, 
         cs_error(vm, "str_endswith() requires 2 string arguments"); 
         return 1; 
     }
-    uint64_t prof_start = stdlib_now_ms();
     
     const char* s = cs_to_cstr(argv[0]);
     const char* suffix = cs_to_cstr(argv[1]);
@@ -2464,12 +3098,10 @@ static int nf_str_endswith(cs_vm* vm, void* ud, int argc, const cs_value* argv, 
     
     if (suffix_len > s_len) {
         *out = cs_bool(0);
-        prof_string_op(vm, prof_start);
         return 0;
     }
     
     *out = cs_bool(strcmp(s + s_len - suffix_len, suffix) == 0);
-    prof_string_op(vm, prof_start);
     return 0;
 }
 
@@ -2480,14 +3112,12 @@ static int nf_str_repeat(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs
         cs_error(vm, "str_repeat() requires a string and an integer"); 
         return 1; 
     }
-    uint64_t prof_start = stdlib_now_ms();
     
     const char* s = cs_to_cstr(argv[0]);
     int64_t count = argv[1].as.i;
     
     if (count <= 0) {
         *out = cs_str(vm, "");
-        prof_string_op(vm, prof_start);
         return 0;
     }
     
@@ -2502,9 +3132,9 @@ static int nf_str_repeat(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs
         p += s_len;
     }
     *p = '\0';
-
-    *out = cs_str_take(vm, result, (uint64_t)total_len);
-    prof_string_op(vm, prof_start);
+    
+    *out = cs_str(vm, result);
+    free(result);
     return 0;
 }
 
@@ -2512,8 +3142,6 @@ static int nf_split_lines(cs_vm* vm, void* ud, int argc, const cs_value* argv, c
     (void)ud;
     if (!out) return 0;
     if (argc != 1 || argv[0].type != CS_T_STR) { *out = cs_nil(); return 0; }
-
-    uint64_t prof_start = stdlib_now_ms();
 
     const cs_string* s = (const cs_string*)argv[0].as.p;
     const char* data = s ? s->data : "";
@@ -2550,7 +3178,121 @@ static int nf_split_lines(cs_vm* vm, void* ud, int argc, const cs_value* argv, c
     cs_value_release(tv);
 
     *out = listv;
-    prof_string_op(vm, prof_start);
+    return 0;
+}
+
+static int list_contains_value_local(cs_list_obj* l, cs_value v) {
+    if (!l) return 0;
+    for (size_t i = 0; i < l->len; i++) {
+        if (cs_value_equals(&l->items[i], &v)) return 1;
+    }
+    return 0;
+}
+
+static int nf_list_unique(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_LIST) { *out = cs_list(vm); return 0; }
+    cs_list_obj* src = (cs_list_obj*)argv[0].as.p;
+    cs_value listv = cs_list(vm);
+    if (!listv.as.p) { cs_error(vm, "out of memory"); return 1; }
+    cs_list_obj* outl = (cs_list_obj*)listv.as.p;
+    for (size_t i = 0; i < src->len; i++) {
+        cs_value item = src->items[i];
+        if (!list_contains_value_local(outl, item)) {
+            if (!list_ensure(outl, outl->len + 1)) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+            outl->items[outl->len++] = cs_value_copy(item);
+        }
+    }
+    *out = listv;
+    return 0;
+}
+
+static int nf_list_flatten(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_LIST) { *out = cs_list(vm); return 0; }
+    cs_list_obj* src = (cs_list_obj*)argv[0].as.p;
+    cs_value listv = cs_list(vm);
+    if (!listv.as.p) { cs_error(vm, "out of memory"); return 1; }
+    cs_list_obj* outl = (cs_list_obj*)listv.as.p;
+    for (size_t i = 0; i < src->len; i++) {
+        cs_value item = src->items[i];
+        if (item.type == CS_T_LIST) {
+            cs_list_obj* sub = (cs_list_obj*)item.as.p;
+            for (size_t j = 0; j < sub->len; j++) {
+                if (!list_ensure(outl, outl->len + 1)) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+                outl->items[outl->len++] = cs_value_copy(sub->items[j]);
+            }
+        } else {
+            if (!list_ensure(outl, outl->len + 1)) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+            outl->items[outl->len++] = cs_value_copy(item);
+        }
+    }
+    *out = listv;
+    return 0;
+}
+
+static int nf_list_chunk(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_LIST || argv[1].type != CS_T_INT) { *out = cs_list(vm); return 0; }
+    int64_t size = argv[1].as.i;
+    cs_value listv = cs_list(vm);
+    if (!listv.as.p) { cs_error(vm, "out of memory"); return 1; }
+    if (size <= 0) { *out = listv; return 0; }
+    cs_list_obj* src = (cs_list_obj*)argv[0].as.p;
+    cs_list_obj* outl = (cs_list_obj*)listv.as.p;
+    for (size_t i = 0; i < src->len; i += (size_t)size) {
+        cs_value chunkv = cs_list(vm);
+        if (!chunkv.as.p) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+        cs_list_obj* chunk = (cs_list_obj*)chunkv.as.p;
+        size_t end = i + (size_t)size;
+        if (end > src->len) end = src->len;
+        for (size_t j = i; j < end; j++) {
+            if (!list_ensure(chunk, chunk->len + 1)) { cs_value_release(chunkv); cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+            chunk->items[chunk->len++] = cs_value_copy(src->items[j]);
+        }
+        if (!list_ensure(outl, outl->len + 1)) { cs_value_release(chunkv); cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+        outl->items[outl->len++] = chunkv;
+    }
+    *out = listv;
+    return 0;
+}
+
+static int nf_list_compact(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_LIST) { *out = cs_list(vm); return 0; }
+    cs_list_obj* src = (cs_list_obj*)argv[0].as.p;
+    cs_value listv = cs_list(vm);
+    if (!listv.as.p) { cs_error(vm, "out of memory"); return 1; }
+    cs_list_obj* outl = (cs_list_obj*)listv.as.p;
+    for (size_t i = 0; i < src->len; i++) {
+        if (src->items[i].type == CS_T_NIL) continue;
+        if (!list_ensure(outl, outl->len + 1)) { cs_value_release(listv); cs_error(vm, "out of memory"); return 1; }
+        outl->items[outl->len++] = cs_value_copy(src->items[i]);
+    }
+    *out = listv;
+    return 0;
+}
+
+static int nf_list_sum(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_LIST) { *out = cs_nil(); return 0; }
+    cs_list_obj* src = (cs_list_obj*)argv[0].as.p;
+    double sum = 0.0;
+    int has_float = 0;
+    for (size_t i = 0; i < src->len; i++) {
+        cs_value v = src->items[i];
+        if (v.type == CS_T_NIL) continue;
+        if (v.type == CS_T_INT) sum += (double)v.as.i;
+        else if (v.type == CS_T_FLOAT) { sum += v.as.f; has_float = 1; }
+        else { *out = cs_nil(); return 0; }
+    }
+    if (has_float) *out = cs_float(sum);
+    else *out = cs_int((int64_t)sum);
     return 0;
 }
 
@@ -2771,11 +3513,9 @@ static int nf_contains(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_v
                 *out = cs_bool(0);
                 return 0;
             }
-            uint64_t prof_start = stdlib_now_ms();
             const char* haystack = cs_to_cstr(container);
             const char* needle = cs_to_cstr(item);
             *out = cs_bool(strstr(haystack, needle) != NULL);
-            prof_string_op(vm, prof_start);
             return 0;
         }
         
@@ -2925,6 +3665,11 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "insert", nf_insert, NULL);
     cs_register_native(vm, "remove", nf_remove, NULL);
     cs_register_native(vm, "slice",  nf_slice,  NULL);
+    cs_register_native(vm, "list_unique",  nf_list_unique,  NULL);
+    cs_register_native(vm, "list_flatten", nf_list_flatten, NULL);
+    cs_register_native(vm, "list_chunk",   nf_list_chunk,   NULL);
+    cs_register_native(vm, "list_compact", nf_list_compact, NULL);
+    cs_register_native(vm, "list_sum",     nf_list_sum,     NULL);
     cs_register_native(vm, "substr", nf_substr, NULL);
     cs_register_native(vm, "join",   nf_join,   NULL);
     cs_register_native(vm, "to_int", nf_to_int, NULL);
@@ -2955,6 +3700,16 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "str_find",    nf_str_find,    NULL);
     cs_register_native(vm, "str_replace", nf_str_replace, NULL);
     cs_register_native(vm, "str_split",   nf_str_split,   NULL);
+    cs_register_native(vm, "str_contains", nf_str_contains, NULL);
+    cs_register_native(vm, "str_count",    nf_str_count,    NULL);
+    cs_register_native(vm, "str_pad_start", nf_str_pad_start, NULL);
+    cs_register_native(vm, "str_pad_end",   nf_str_pad_end,   NULL);
+    cs_register_native(vm, "str_reverse",   nf_str_reverse,   NULL);
+    cs_register_native(vm, "regex_is_match", nf_regex_is_match, NULL);
+    cs_register_native(vm, "regex_match",    nf_regex_match,    NULL);
+    cs_register_native(vm, "regex_find",     nf_regex_find,     NULL);
+    cs_register_native(vm, "regex_find_all", nf_regex_find_all, NULL);
+    cs_register_native(vm, "regex_replace",  nf_regex_replace,  NULL);
     cs_register_native(vm, "path_join",   nf_path_join,   NULL);
     cs_register_native(vm, "path_dirname", nf_path_dirname, NULL);
     cs_register_native(vm, "path_basename", nf_path_basename, NULL);
@@ -2974,11 +3729,22 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "chdir",      nf_chdir,      NULL);
     cs_register_native(vm, "fmt",         nf_fmt,         NULL);
     cs_register_native(vm, "now_ms",      nf_now_ms,      NULL);
+    cs_register_native(vm, "unix_ms",     nf_unix_ms,     NULL);
+    cs_register_native(vm, "unix_s",      nf_unix_s,      NULL);
+    cs_register_native(vm, "datetime_now",            nf_datetime_now,            NULL);
+    cs_register_native(vm, "datetime_utc",            nf_datetime_utc,            NULL);
+    cs_register_native(vm, "datetime_from_unix_ms",    nf_datetime_from_unix_ms,   NULL);
+    cs_register_native(vm, "datetime_from_unix_ms_utc", nf_datetime_from_unix_ms_utc, NULL);
     cs_register_native(vm, "sleep",       nf_sleep,       NULL);
+    cs_register_native(vm, "delay",       nf_sleep,       NULL);
     cs_register_native(vm, "promise",     nf_promise,     NULL);
     cs_register_native(vm, "resolve",     nf_resolve,     NULL);
     cs_register_native(vm, "reject",      nf_reject,      NULL);
     cs_register_native(vm, "is_promise",  nf_is_promise,  NULL);
+    cs_register_native(vm, "await_all",   nf_await_all,   NULL);
+    cs_register_native(vm, "await_any",   nf_await_any,   NULL);
+    cs_register_native(vm, "await_all_settled", nf_await_all_settled, NULL);
+    cs_register_native(vm, "timeout",     nf_timeout,     NULL);
     
     // String ergonomics
     cs_register_native(vm, "str_trim",       nf_str_trim,       NULL);
@@ -3034,9 +3800,29 @@ void cs_register_stdlib(cs_vm* vm) {
         cs_map_set(err_map, "NOT_FOUND", cs_str(vm, "NOT_FOUND"));
         cs_map_set(err_map, "ASSERTION", cs_str(vm, "ASSERTION"));
         cs_map_set(err_map, "GENERIC", cs_str(vm, "ERROR"));
+
+        // Network error codes
+        cs_map_set(err_map, "NET_RESOLVE", cs_str(vm, "NET_RESOLVE"));
+        cs_map_set(err_map, "NET_CONNECT", cs_str(vm, "NET_CONNECT"));
+        cs_map_set(err_map, "NET_TIMEOUT", cs_str(vm, "NET_TIMEOUT"));
+        cs_map_set(err_map, "NET_CLOSED", cs_str(vm, "NET_CLOSED"));
+        cs_map_set(err_map, "NET_SEND", cs_str(vm, "NET_SEND"));
+        cs_map_set(err_map, "NET_RECV", cs_str(vm, "NET_RECV"));
+        cs_map_set(err_map, "HTTP_PARSE", cs_str(vm, "HTTP_PARSE"));
+        cs_map_set(err_map, "HTTP_REDIRECT", cs_str(vm, "HTTP_REDIRECT"));
+        cs_map_set(err_map, "HTTP_NO_TLS", cs_str(vm, "HTTP_NO_TLS"));
+        cs_map_set(err_map, "TLS_INIT", cs_str(vm, "TLS_INIT"));
+        cs_map_set(err_map, "TLS_HANDSHAKE", cs_str(vm, "TLS_HANDSHAKE"));
+        cs_map_set(err_map, "TLS_CERT", cs_str(vm, "TLS_CERT"));
+        cs_map_set(err_map, "TLS_READ", cs_str(vm, "TLS_READ"));
+        cs_map_set(err_map, "TLS_WRITE", cs_str(vm, "TLS_WRITE"));
         
         // Register as global ERR constant
         cs_register_global(vm, "ERR", err_map);
         cs_value_release(err_map);
     }
+
+    cs_register_net_stdlib(vm);
+    cs_register_tls_stdlib(vm);
+    cs_register_http_stdlib(vm);
 }

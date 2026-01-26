@@ -4,6 +4,7 @@
 #include "cupidscript.h"
 #include "cs_parser.h"
 #include "cs_value.h"
+#include "cs_event_loop.h"
 
 typedef struct cs_env {
     int ref;
@@ -113,6 +114,11 @@ struct cs_vm {
     cs_task* task_tail;
     cs_timer* timers;
 
+    // Network I/O pending operations
+    cs_pending_io* pending_io;
+    int pending_io_count;
+    uint64_t net_default_timeout_ms;  // default 30000 (30 seconds)
+
     // GC auto-collect policy
     size_t gc_threshold;            // collect when tracked_count >= threshold; 0 = disabled
     size_t gc_allocations;          // total allocations since last GC
@@ -146,5 +152,6 @@ int cs_promise_resolve(cs_vm* vm, cs_value promise, cs_value value);
 int cs_promise_reject(cs_vm* vm, cs_value promise, cs_value value);
 int cs_promise_is_pending(cs_value promise);
 void cs_schedule_timer(cs_vm* vm, cs_value promise, uint64_t due_ms);
+cs_value cs_wait_promise(cs_vm* vm, cs_value promise, int* ok);
 
 #endif

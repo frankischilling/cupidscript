@@ -215,6 +215,52 @@ let img = ImageFile("cat.png");
 * `super` refers to the parent class inside methods.
 * Instances are created by calling the class as a function.
 
+## Structs
+
+Structs define fixed-field data types with positional construction.
+
+```c
+struct Point { x, y = 0 }
+let p = Point(3);    // x=3, y=0
+let q = Point(1, 2); // x=1, y=2
+```
+
+## Enums
+
+Enums define named integer constants:
+
+```c
+enum Color { Red, Green = 5, Blue }
+print(Color.Red);   // 0
+print(Color.Green); // 5
+print(Color.Blue);  // 6
+```
+
+## Generators (`yield`)
+
+Functions that use `yield` return a list of yielded values when called:
+
+```c
+fn range(n) {
+  let i = 0;
+  while (i < n) {
+    yield i;
+    i += 1;
+  }
+}
+
+let xs = range(4); // [0, 1, 2, 3]
+```
+
+## Async / Await
+
+Async functions and `await` are supported (currently synchronous execution):
+
+```c
+async fn add(a, b) { return a + b; }
+let v = await add(2, 3);
+```
+
 ## Operators & Punctuation
 
 ### Punctuation
@@ -293,7 +339,19 @@ switch (x) {
 Notes:
 
 * Cases are compared using the same equality rules as `==` for basic types.
-* Non-fallthrough: only the first matching case runs.
+* Fallthrough: once a case matches, execution continues into subsequent cases until a `break` is hit or the switch ends.
+* `default` can appear anywhere; if no case matches, execution starts at `default` and falls through to later cases.
+
+Pattern cases are supported (no guards):
+
+```c
+switch (value) {
+  case [a, b, ...rest] { print(a, b, rest); }
+  case {x, y: yy} { print(x + yy); }
+  case int(x) { print("int", x); }
+  default { print("other"); }
+}
+```
 
 ## `defer` Statement
 

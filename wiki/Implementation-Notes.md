@@ -64,6 +64,7 @@ Expressions:
 * `N_MAPLIT` (map literals `{...}`)
 * `N_IDENT`
 * `N_LIT_INT`, `N_LIT_FLOAT`, `N_LIT_STR`, `N_LIT_BOOL`, `N_LIT_NIL`
+* `N_PATTERN_TYPE` (type pattern `Type(x)` in match/switch)
 
 ### Assignment Grammar
 
@@ -135,6 +136,14 @@ A function value stores:
 * parameter list
 * body AST pointer
 * closure env (refcounted)
+
+### Async Scheduler
+
+Async functions return promises and are scheduled as tasks in a cooperative queue.
+
+* `sleep(ms)` schedules a timer that resolves its promise at `now + ms`.
+* `await` runs the scheduler until the promise resolves (or rejects).
+* Rejections propagate as runtime throws from `await`.
 
 ### Strings
 
