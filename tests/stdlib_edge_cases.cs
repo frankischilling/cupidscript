@@ -17,8 +17,8 @@ assert(path_ext("noext") == "", "path_ext none");
 assert(path_ext(".bashrc") == "", "path_ext dotfile");
 
 // sleep: non-positive should be a no-op (no error)
-sleep(0);
-sleep(-1);
+await sleep(0);
+await sleep(-1);
 
 // fmt: empty format string
 assert(fmt("") == "", "fmt empty");

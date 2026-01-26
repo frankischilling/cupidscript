@@ -2,7 +2,7 @@
 // Trigger the VM wall-clock timeout guard.
 
 set_timeout(1);   // 1ms
-sleep(25);        // exceed timeout while in native sleep
+await sleep(25);        // exceed timeout while awaiting sleep
 
 // Do at least one VM step after sleeping so the timeout check triggers.
 let x = 0;
