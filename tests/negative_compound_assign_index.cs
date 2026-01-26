@@ -1,5 +1,8 @@
-// EXPECT_FAIL
-// Compound assignment is only supported for variables (not index assignments)
+// Compound assignment on index expressions
 
 let xs = [1];
 xs[0] += 1;
+assert(xs[0] == 2, "index +=");
+
+xs[0] -= 1;
+assert(xs[0] == 1, "index -=");
