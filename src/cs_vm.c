@@ -1123,12 +1123,6 @@ static int map_is_struct(cs_value v) {
 }
 
 
-static cs_value map_get_class(cs_value v) {
-    if (v.type != CS_T_MAP) return cs_nil();
-    cs_string* k = key_class();
-    return k ? map_get_strkey(as_map(v), k) : map_get_cstr(as_map(v), "__class");
-}
-
 static int class_find_method(cs_value class_val, const char* name, cs_value* method_out, cs_value* owner_out) {
     if (method_out) *method_out = cs_nil();
     if (owner_out) *owner_out = cs_nil();
@@ -1803,6 +1797,7 @@ static int build_call_argv(cs_vm* vm, cs_env* env, ast** args, size_t arg_count,
 }
 
 static int match_type_name(cs_vm* vm, cs_env* env, const char* name, cs_value v) {
+    (void)vm;
     if (!name) return 0;
     if (strcmp(name, "nil") == 0) return v.type == CS_T_NIL;
     if (strcmp(name, "bool") == 0) return v.type == CS_T_BOOL;

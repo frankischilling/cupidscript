@@ -76,14 +76,14 @@ static cs_value datetime_map_from_tm(cs_vm* vm, const struct tm* t, int ms, int 
 }
 
 static int nf_unix_ms(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
-    (void)ud; (void)argc; (void)argv;
+    (void)vm; (void)ud; (void)argc; (void)argv;
     if (!out) return 0;
     *out = cs_int((int64_t)wall_clock_ms());
     return 0;
 }
 
 static int nf_unix_s(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
-    (void)ud; (void)argc; (void)argv;
+    (void)vm; (void)ud; (void)argc; (void)argv;
     if (!out) return 0;
     *out = cs_int((int64_t)time(NULL));
     return 0;
@@ -3278,7 +3278,7 @@ static int nf_list_compact(cs_vm* vm, void* ud, int argc, const cs_value* argv, 
 }
 
 static int nf_list_sum(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
-    (void)ud;
+    (void)vm; (void)ud;
     if (!out) return 0;
     if (argc != 1 || argv[0].type != CS_T_LIST) { *out = cs_nil(); return 0; }
     cs_list_obj* src = (cs_list_obj*)argv[0].as.p;
