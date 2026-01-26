@@ -12,7 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     name: Update wiki
     steps:
+      - uses: actions/checkout@v4
+
       - uses: OrlovM/Wiki-Action@v1
         with:
-          path: 'wiki'
+          path: wiki
           token: ${{ secrets.GITHUB_TOKEN }}
