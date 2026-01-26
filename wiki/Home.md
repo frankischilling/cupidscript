@@ -5,8 +5,10 @@ CupidScript is a small embeddable scripting language with:
 * A C lexer + recursive-descent parser
 * A tree-walking VM (interpreter)
 * Closures (function literals capture their environment)
-* Basic built-in types: `nil`, `bool`, `int`, `float`, `string`, `list`, `map`, `strbuf`
-* A practical standard library for scripts (printing, strings, collections, paths, math, time)
+* Basic built-in types: `nil`, `bool`, `int`, `float`, `string`, `list`, `map`, `strbuf`, `range`, `promise`
+* Async/await with promises and a cooperative scheduler
+* Pattern matching (`match`) and `switch` with patterns
+* A practical standard library for scripts (printing, strings, collections, paths, regex, math, time, JSON)
 
 ## Quick Example
 
@@ -25,7 +27,7 @@ print("sum:", add(xs[0], xs[1]));
 
 ### Keywords
 
-`let`, `const`, `fn`, `class`, `self`, `super`, `if`, `else`, `while`, `switch`, `case`, `default`, `for`, `in`, `break`, `continue`, `return`, `throw`, `try`, `catch`, `finally`, `defer`, `match`, `import`, `export`, `true`, `false`, `nil`
+`let`, `const`, `fn`, `async`, `await`, `yield`, `class`, `struct`, `enum`, `self`, `super`, `if`, `else`, `while`, `switch`, `case`, `default`, `for`, `in`, `break`, `continue`, `return`, `throw`, `try`, `catch`, `finally`, `defer`, `match`, `import`, `export`, `true`, `false`, `nil`
 
 ### Expressions
 

@@ -134,10 +134,10 @@ Syntax:
 Creates a lazy range from `start` to `end`:
 
 ```c
-let nums = 0..5;      // [0, 1, 2, 3, 4]
-let incl = 0..=5;     // [0, 1, 2, 3, 4, 5]
-let down = 10..5;     // [10, 9, 8, 7, 6]
-let down_incl = 10..=5; // [10, 9, 8, 7, 6, 5]
+let nums = 0..5;        // range 0..5 (exclusive)
+let incl = 0..=5;       // range 0..=5 (inclusive)
+let down = 10..5;       // descending range
+let down_incl = 10..=5; // descending inclusive range
 
 // Use with for-in loops
 for i in 0..10 {

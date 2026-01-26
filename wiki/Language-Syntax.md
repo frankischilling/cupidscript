@@ -124,7 +124,7 @@ Trailing commas are allowed:
 {}
 ```
 
-Keys must be string expressions (can be any expression that evaluates to a string).
+Keys are expressions (any value is allowed). For convenience, an identifier before `:` is treated as a string key.
 
 ## Functions
 

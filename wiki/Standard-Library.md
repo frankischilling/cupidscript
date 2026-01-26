@@ -11,7 +11,7 @@ Prints values separated by spaces and ends with newline.
 ### `typeof(value) -> string`
 
 Returns one of:
-`"nil" "bool" "int" "float" "string" "list" "map" "strbuf" "function" "native" "promise"`
+`"nil" "bool" "int" "float" "string" "list" "map" "strbuf" "range" "function" "native" "promise"`
 
 ### Type Predicates
 
@@ -72,12 +72,12 @@ If the file exists, it behaves like `require()` and returns the module exports.
 Creates a standardized error object with:
 
 * `msg` - Error message
-* `code` - Optional error code for categorization
+* `code` - Error code (defaults to `"ERROR"` if omitted)
 * `stack` - List of stack frame strings
 
 ### `is_error(value) -> bool`
 
-Returns `true` if value is an error object (has `msg` and `stack` fields).
+Returns `true` if value is an error object (has `msg` and `code` fields).
 
 Example:
 
@@ -100,7 +100,9 @@ try {
 
 ### `format_error(err) -> string`
 
-Formats an error object (as produced by `error()`) into a human-readable string, including stack trace when present.
+Formats an error object (as produced by `error()`) into a human-readable string.
+
+Current format is a single line: `[CODE] message`. Stack traces are available on `err.stack`.
 
 ### `ERR -> map`
 

@@ -38,7 +38,7 @@ Common runtime errors:
 * comparisons require both ints or both strings
 * attempted to call non-function
 * wrong argument count
-* indexing expects list[int] or map[string]
+* indexing expects list[int] or map[key]
 * field access expects map
 * uncaught exception (from `throw`)
 
@@ -74,10 +74,10 @@ throw {"msg": "file not found", "code": 404, "path": p};
 
 For standardized error handling, use the `error()` helper to create error objects:
 
-* `error(msg)` - Creates a map with `{msg, stack}` fields
+* `error(msg)` - Creates a map with `{msg, code, stack}` fields (`code` defaults to `"ERROR"`)
 * `error(msg, code)` - Creates a map with `{msg, code, stack}` fields
-* `is_error(value)` - Checks if value is an error object (has `msg` and `stack` fields)
-* `format_error(err)` - Formats an error object into a readable string
+* `is_error(value)` - Checks if value is an error object (has `msg` and `code` fields)
+* `format_error(err)` - Formats an error object into a readable string (`[CODE] message`)
 
 There is also a global `ERR` map containing common string error codes you can use with `error(msg, code)`.
 
@@ -99,6 +99,7 @@ try {
   if (is_error(e)) {
     print("Error:", e.msg);
     print("Code:", e.code);
+    print("Formatted:", format_error(e));
     print("Stack trace:");
     for frame in e.stack {
       print("  ", frame);
@@ -116,7 +117,7 @@ Benefits of error objects:
 
 * Consistent structure across all errors
 * Automatic stack trace capture
-* Optional error codes for categorization
+* Error codes for categorization (`code` is always present)
 * Easy to check with `is_error()`
 
 `finally` can be a block or a single expression statement:
