@@ -97,5 +97,5 @@ while (steps == 0 || step < steps) {
   }
   grid = next;
   step = step + 1;
-  if (delay_ms > 0) { sleep(delay_ms); }
+  if (delay_ms > 0) { await sleep(delay_ms); }
 }

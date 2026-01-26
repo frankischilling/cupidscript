@@ -83,18 +83,24 @@ static ast* parse_switch(parser* P) {
 
     size_t cap = 4, cnt = 0;
     ast** case_exprs = (ast**)malloc(sizeof(ast*) * cap);
+    ast** case_patterns = (ast**)malloc(sizeof(ast*) * cap);
     ast** case_blocks = (ast**)malloc(sizeof(ast*) * cap);
+    unsigned char* case_kinds = (unsigned char*)malloc(sizeof(unsigned char) * cap);
     int default_seen = 0;
 
-    if (!case_exprs || !case_blocks) {
+    if (!case_exprs || !case_patterns || !case_blocks || !case_kinds) {
         free(case_exprs);
+        free(case_patterns);
         free(case_blocks);
+        free(case_kinds);
         if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory");
         // best-effort parse recovery: consume until end of switch block
         while (P->tok.type != TK_RBRACE && P->tok.type != TK_EOF) next(P);
         (void)expect(P, TK_RBRACE, "expected '}' after switch");
         n->as.switch_stmt.case_exprs = NULL;
+        n->as.switch_stmt.case_patterns = NULL;
         n->as.switch_stmt.case_blocks = NULL;
+        n->as.switch_stmt.case_kinds = NULL;
         n->as.switch_stmt.case_count = 0;
         return n;
     }
@@ -106,11 +112,36 @@ static ast* parse_switch(parser* P) {
                 ast** ne = (ast**)realloc(case_exprs, sizeof(ast*) * cap);
                 if (!ne) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
                 case_exprs = ne;
+                ast** np = (ast**)realloc(case_patterns, sizeof(ast*) * cap);
+                if (!np) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
+                case_patterns = np;
                 ast** nb = (ast**)realloc(case_blocks, sizeof(ast*) * cap);
                 if (!nb) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
                 case_blocks = nb;
+                unsigned char* nk = (unsigned char*)realloc(case_kinds, sizeof(unsigned char) * cap);
+                if (!nk) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
+                case_kinds = nk;
             }
-            case_exprs[cnt] = parse_expr(P);
+            int is_pattern = 0;
+            if (P->tok.type == TK_LBRACKET || P->tok.type == TK_LBRACE || P->tok.type == TK_PLACEHOLDER) {
+                is_pattern = 1;
+            } else if (P->tok.type == TK_IDENT) {
+                lexer saveL = P->L;
+                token saveT = P->tok;
+                next(P);
+                if (P->tok.type == TK_LPAREN) is_pattern = 1;
+                P->L = saveL;
+                P->tok = saveT;
+            }
+            if (is_pattern) {
+                case_patterns[cnt] = parse_match_pattern(P);
+                case_exprs[cnt] = NULL;
+                case_kinds[cnt] = 1;
+            } else {
+                case_exprs[cnt] = parse_expr(P);
+                case_patterns[cnt] = NULL;
+                case_kinds[cnt] = 0;
+            }
             case_blocks[cnt] = parse_block(P);
             cnt++;
             continue;
@@ -126,12 +157,20 @@ static ast* parse_switch(parser* P) {
                 ast** ne = (ast**)realloc(case_exprs, sizeof(ast*) * cap);
                 if (!ne) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
                 case_exprs = ne;
+                ast** np = (ast**)realloc(case_patterns, sizeof(ast*) * cap);
+                if (!np) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
+                case_patterns = np;
                 ast** nb = (ast**)realloc(case_blocks, sizeof(ast*) * cap);
                 if (!nb) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
                 case_blocks = nb;
+                unsigned char* nk = (unsigned char*)realloc(case_kinds, sizeof(unsigned char) * cap);
+                if (!nk) { if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory"); break; }
+                case_kinds = nk;
             }
             case_exprs[cnt] = NULL;
+            case_patterns[cnt] = NULL;
             case_blocks[cnt] = parse_block(P);
+            case_kinds[cnt] = 2;
             cnt++;
             default_seen = 1;
             continue;
@@ -144,7 +183,9 @@ static ast* parse_switch(parser* P) {
     expect(P, TK_RBRACE, "expected '}' after switch");
 
     n->as.switch_stmt.case_exprs = case_exprs;
+    n->as.switch_stmt.case_patterns = case_patterns;
     n->as.switch_stmt.case_blocks = case_blocks;
+    n->as.switch_stmt.case_kinds = case_kinds;
     n->as.switch_stmt.case_count = cnt;
     return n;
 }
@@ -1019,9 +1060,18 @@ static ast* parse_match_pattern(parser* P) {
         return n;
     }
     if (P->tok.type == TK_IDENT || P->tok.type == TK_SELF || P->tok.type == TK_SUPER) {
-        ast* n = node(P, N_IDENT);
-        n->as.ident.name = cs_strndup2(P->tok.start, P->tok.len);
+        char* name = cs_strndup2(P->tok.start, P->tok.len);
         next(P);
+        if (accept(P, TK_LPAREN)) {
+            ast* inner = parse_match_pattern(P);
+            expect(P, TK_RPAREN, "expected ')' after type pattern");
+            ast* n = node(P, N_PATTERN_TYPE);
+            n->as.type_pattern.type_name = name;
+            n->as.type_pattern.inner = inner;
+            return n;
+        }
+        ast* n = node(P, N_IDENT);
+        n->as.ident.name = name;
         return n;
     }
 
@@ -1748,10 +1798,13 @@ void ast_free(ast* node) {
             ast_free(node->as.switch_stmt.expr);
             for (size_t i = 0; i < node->as.switch_stmt.case_count; i++) {
                 ast_free(node->as.switch_stmt.case_exprs[i]);
+                ast_free(node->as.switch_stmt.case_patterns[i]);
                 ast_free(node->as.switch_stmt.case_blocks[i]);
             }
             free(node->as.switch_stmt.case_exprs);
+            free(node->as.switch_stmt.case_patterns);
             free(node->as.switch_stmt.case_blocks);
+            free(node->as.switch_stmt.case_kinds);
             break;
         case N_MATCH:
             ast_free(node->as.match_expr.expr);
@@ -1946,6 +1999,10 @@ void ast_free(ast* node) {
             free(node->as.map_pattern.keys);
             free(node->as.map_pattern.names);
             free(node->as.map_pattern.rest_name);
+            break;
+        case N_PATTERN_TYPE:
+            free(node->as.type_pattern.type_name);
+            ast_free(node->as.type_pattern.inner);
             break;
         case N_SPREAD:
             ast_free(node->as.spread.expr);

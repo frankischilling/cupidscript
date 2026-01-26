@@ -21,7 +21,8 @@ typedef enum {
     CS_T_STRBUF,
     CS_T_RANGE,
     CS_T_FUNC,
-    CS_T_NATIVE
+    CS_T_NATIVE,
+    CS_T_PROMISE
 } cs_type;
 
 typedef struct {

@@ -54,6 +54,7 @@ typedef enum {
     N_STR_INTERP,
     N_PATTERN_LIST,
     N_PATTERN_MAP,
+    N_PATTERN_TYPE,
     N_PATTERN_WILDCARD,
     N_PLACEHOLDER,
     N_LIT_BOOL,
@@ -74,9 +75,10 @@ struct ast {
         struct {
             ast* expr;
             ast** case_exprs;
+            ast** case_patterns;
             ast** case_blocks;
+            unsigned char* case_kinds; // 0=expr, 1=pattern, 2=default
             size_t case_count;
-            ast* default_block; // optional
         } switch_stmt;
         struct {
             ast* expr;
@@ -158,7 +160,11 @@ struct ast {
         struct { ast** items; size_t count; } listlit;
         struct { ast** keys; ast** vals; size_t count; } maplit;
         struct { char** names; size_t count; char* rest_name; } list_pattern;
-        struct { char** keys; char** names; size_t count; char* rest_name; } map_pattern;
+            struct { char** keys; char** names; size_t count; char* rest_name; } map_pattern;
+            struct {
+                char* type_name;  // identifier
+                ast* inner;       // binding pattern
+            } type_pattern;
 
         struct { char* name; } ident;
         struct { ast* expr; } spread;

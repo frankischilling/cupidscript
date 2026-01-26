@@ -58,6 +58,12 @@ typedef struct cs_range_obj {
     int inclusive;
 } cs_range_obj;
 
+typedef struct cs_promise_obj {
+    int ref;
+    int state; // 0=pending, 1=fulfilled, 2=rejected
+    cs_value value;
+} cs_promise_obj;
+
 // refcounted heap objects
 cs_string* cs_str_new(const char* s);
 cs_string* cs_str_new_take(char* owned, size_t len);
