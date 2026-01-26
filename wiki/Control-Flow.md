@@ -22,7 +22,7 @@ if (cond) {
 }
 ```
 
-Notes:
+Notes for this:
 
 * Parentheses are required: `if ( ... )`
 * `else` block is optional
@@ -361,3 +361,4 @@ try {
   print("Error:", e);
 }
 ```
+
