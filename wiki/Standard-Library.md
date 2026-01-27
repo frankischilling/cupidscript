@@ -19,6 +19,7 @@
 - [Filesystem](#filesystem)
 - [Formatting](#formatting)
 - [JSON](#json)
+- [Data Format Functions](#data-format-functions)
 - [Time](#time)
 - [Promises](#promises)
 - [Math Functions](#math-functions)
@@ -751,6 +752,145 @@ let obj = {"name": "frank", "age": 30, "tags": ["a", "b"]};
 let s = json_stringify(obj);
 let back = json_parse(s);
 print(back.name);
+```
+
+## Data Format Functions
+
+CupidScript supports CSV, YAML, and XML data formats. See [Data-Formats](Data-Formats.md) for detailed usage and examples.
+
+### CSV Functions
+
+#### `csv_parse(text: string, options?: map) -> list`
+
+Parses CSV text into a list of lists (rows). Each row is a list of string fields.
+
+Options:
+* `delimiter` - Field separator (default: `","`)
+* `quote` - Quote character (default: `"\""`)
+* `headers` - Treat first row as headers, return list of maps (default: `false`)
+* `skip_empty` - Skip empty rows (default: `false`)
+* `trim` - Trim whitespace from fields (default: `false`)
+
+Example:
+```cs
+let csv = "name,age,city\nJohn,30,NYC\nAlice,25,LA";
+let rows = csv_parse(csv);
+// Returns: [["name", "age", "city"], ["John", "30", "NYC"], ["Alice", "25", "LA"]]
+
+// With headers
+let records = csv_parse(csv, {headers: true});
+// Returns: [{"name": "John", "age": "30", "city": "NYC"}, ...]
+```
+
+#### `csv_stringify(rows: list, options?: map) -> string`
+
+Converts a list of lists (or list of maps) to CSV format.
+
+Options:
+* `delimiter` - Field separator (default: `","`)
+* `quote` - Quote character (default: `"\""`)
+
+Example:
+```cs
+let data = [["name", "age"], ["Bob", "35"]];
+let csv = csv_stringify(data);
+// Returns: "name,age\nBob,35\n"
+```
+
+### YAML Functions
+
+#### `yaml_parse(text: string) -> value`
+
+Parses YAML text into CupidScript values:
+* Scalars: strings, numbers, booleans, null
+* Collections: maps (key-value), lists
+* Flow style: `{a: 1}`, `[1, 2, 3]`
+* Comments are ignored
+
+Example:
+```cs
+let yaml = "name: MyApp\nversion: 1.0.0\ndebug: true";
+let config = yaml_parse(yaml);
+print(config.name);     // "MyApp"
+print(config.debug);    // true
+```
+
+#### `yaml_stringify(value, indent?: int) -> string`
+
+Converts a value to YAML format.
+
+Parameters:
+* `value` - The value to serialize
+* `indent` - Indentation spaces (default: 2, range: 0-8)
+
+Example:
+```cs
+let data = {"host": "localhost", "port": 8080, "tags": ["a", "b"]};
+let yaml = yaml_stringify(data);
+// Returns block-style YAML:
+// host: localhost
+// port: 8080
+// tags:
+//   - a
+//   - b
+```
+
+### XML Functions
+
+#### `xml_parse(text: string) -> map`
+
+Parses XML into a map structure:
+```cs
+{
+  "name": "element-name",
+  "attrs": {"attr1": "value1", ...},  // Optional
+  "text": "text content",              // Optional
+  "children": [...]                    // Optional
+}
+```
+
+Features:
+* Elements, attributes, text content
+* Self-closing tags: `<br/>`
+* CDATA sections
+* Entity decoding: `&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`
+* Numeric entities: `&#65;`, `&#x41;`
+* Comments (skipped)
+* Processing instructions (skipped)
+
+Example:
+```cs
+let xml = "<person name=\"John\" age=\"30\"><city>NYC</city></person>";
+let doc = xml_parse(xml);
+print(doc.name);           // "person"
+print(doc.attrs.name);     // "John"
+print(doc.children[0].text);  // "NYC"
+```
+
+#### `xml_stringify(element: map, indent?: int) -> string`
+
+Converts an element map to XML format.
+
+Parameters:
+* `element` - Map with `name`, optional `attrs`, `text`, and `children`
+* `indent` - Indentation spaces (default: 2, range: 0-8, 0 = compact)
+
+Example:
+```cs
+let elem = {
+  "name": "book",
+  "attrs": {"isbn": "123"},
+  "children": [
+    {"name": "title", "text": "Guide"},
+    {"name": "author", "text": "John"}
+  ]
+};
+let xml = xml_stringify(elem);
+// Returns:
+// <book isbn="123">
+//   <title>Guide</title>
+//   <author>John</author>
+// </book>
 ```
 
 ## Time
