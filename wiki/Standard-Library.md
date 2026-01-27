@@ -881,18 +881,26 @@ print(fmt("x=%d ok=%b name=%s", 10, true, "frank"));
 
 ### `json_parse(text: string) -> value`
 
-Parses JSON into CupidScript values:
+Parses JSON into CupidScript values, fully conforming to [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259):
 
 * `null` → `nil`
 * `true/false` → `bool`
 * numbers → `int` or `float`
-* strings → `string`
+* strings → `string` (all Unicode escapes, including surrogate pairs, are decoded to UTF-8)
 * arrays → `list`
-* objects → `map`
+* objects → `map` (object keys must be strings; non-string keys are rejected)
+
+#### Unicode
+
+All Unicode escapes (`\uXXXX`) are decoded, including surrogate pairs for code points above U+FFFF. Invalid or incomplete surrogate pairs are rejected. CupidScript strings are always valid UTF-8.
+
+#### Object Keys
+
+Object keys must be strings. Parsing or stringifying a map with non-string keys will result in an error, as required by RFC 8259.
 
 ### `json_stringify(value) -> string`
 
-Serializes a value to JSON. Supports `nil`, `bool`, `int`, `float`, `string`, `list`, `map`.
+Serializes a value to JSON. Supports `nil`, `bool`, `int`, `float`, `string`, `list`, `map` (with string keys only). Produces strict RFC 8259-compliant JSON.
 
 Example:
 
@@ -902,6 +910,8 @@ let s = json_stringify(obj);
 let back = json_parse(s);
 print(back.name);
 ```
+
+See also: [JSON Unicode and Surrogate Example](../examples/json_unicode_example.cs)
 
 ## Data Format Functions
 
@@ -948,31 +958,159 @@ let csv = csv_stringify(data);
 
 ### YAML Functions
 
-#### `yaml_parse(text: string) -> value`
+#### `yaml_parse(text: string) -> value | nil`
 
-Parses YAML text into CupidScript values:
-* Scalars: strings, numbers, booleans, null
-* Collections: maps (key-value), lists
-* Flow style: `{a: 1}`, `[1, 2, 3]`
-* Comments are ignored
+Parses YAML 1.2.2 compliant text into CupidScript values.
 
-Example:
+**Parameters:**
+* `text` (string) - YAML-formatted text to parse
+
+**Returns:**
+* Parsed value (map, list, string, number, boolean, or nil)
+* `nil` on parse error (error message is set)
+
+**Supported Features:**
+
+*Scalars:*
+* Plain strings, quoted strings (single `'...'` or double `"..."`)
+* Integers: `123`, `-456`, `0xFF` (hex), `0o777` (octal)
+* Floats: `3.14`, `-2.5`, `1e3` (scientific), `.inf`, `-.inf`, `.nan`
+* Booleans: `true`, `false`, `yes`, `no`, `on`, `off`
+* Null: `null`, `~`, or empty value
+
+*Collections:*
+* Maps (key-value): block or flow style `{key: value}`
+* Lists: block or flow style `[item1, item2]`
+
+*Advanced Features:*
+* **Block scalars:** `|` (literal), `>` (folded)
+* **Chomping:** `|-` (strip), `|+` (keep), `|` (clip)
+* **Explicit indentation:** `|2`, `>4`
+* **Type tags:** `!!str`, `!!int`, `!!float`, `!!bool`, `!!null`
+* **Anchors/aliases:** `&anchor`, `*alias`
+* **Merge keys:** `<<: *anchor`
+* **Explicit keys:** `? key`
+* **Multi-document:** `---` separator
+* **Directives:** `%YAML 1.2`, `%TAG`
+
+*Escape Sequences (double-quoted strings only):*
+* **Common:** `\\`, `\"`, `\0`, `\t`, `\n`, `\r`, `\a`, `\b`, `\v`, `\f`, `\e`, `\ `
+* **Hex:** `\xHH` (2 hex digits, e.g., `\x41` → A)
+* **Unicode:** `\uXXXX` (4 hex digits), `\UXXXXXXXX` (8 hex digits)
+* **Special (YAML 1.2.2):** `\N` (next line), `\_` (NBSP), `\L` (line separator), `\P` (paragraph separator)
+
+**Error Conditions:**
+* Invalid indentation (tabs in block scalars, inconsistent spacing)
+* Reserved indicators `@` or `` ` `` starting plain scalars
+* Unterminated quoted strings
+* Invalid escape sequences
+* Undefined aliases
+* Malformed tags
+* Syntax errors in flow collections
+
+**Examples:**
+
 ```cs
+// Basic parsing
 let yaml = "name: MyApp\nversion: 1.0.0\ndebug: true";
 let config = yaml_parse(yaml);
 print(config.name);     // "MyApp"
 print(config.debug);    // true
+
+// Escape sequences
+let escaped = yaml_parse("text: \"Line1\\nLine2\\x20Tab\\there\"\n");
+print(escaped.text);    // "Line1\nLine2 Tab\there"
+
+// Advanced features
+let advanced = yaml_parse("
+text: |-
+  no trailing newlines
+value: !!str 123
+base: &base
+  x: 1
+  y: 2
+derived:
+  <<: *base
+  y: 99
+");
+print(advanced.derived.x);  // 1 (from base)
+print(advanced.derived.y);  // 99 (overridden)
+
+// Error handling
+let bad = yaml_parse("invalid: [unclosed");
+if (bad == nil) {
+  print("Parse error occurred");
+}
 ```
+
+**Performance:**
+* Optimized for config files up to 1MB
+* Large files (> 10MB) may be slow
+* Deep nesting (> 100 levels) supported but impacts performance
+
+**See Also:** [Data-Formats](Data-Formats) for comprehensive YAML guide
+
+#### `yaml_parse_all(text: string) -> list | nil`
+
+Parses multiple YAML documents separated by `---` from a single string.
+
+**Parameters:**
+* `text` (string) - Multi-document YAML text
+
+**Returns:**
+* List of parsed documents
+* Empty list `[]` if input contains no documents
+* `nil` on parse error
+
+**Example:**
+```cs
+let docs = yaml_parse_all("
+---
+name: Config
+version: 1.0
+...
+---
+name: Data
+items: [a, b, c]
+---
+name: Metadata
+");
+
+print(len(docs));      // 3
+print(docs[0].name);   // "Config"
+print(docs[1].name);   // "Data"
+print(docs[2].name);   // "Metadata"
+
+// Single document also works
+let single = yaml_parse_all("key: value");
+print(len(single));    // 1
+print(single[0].key);  // "value"
+```
+
+**Note:** The explicit document end marker `...` is optional.
 
 #### `yaml_stringify(value, indent?: int) -> string`
 
-Converts a value to YAML format.
+Converts a CupidScript value to YAML 1.2.2 format.
 
-Parameters:
-* `value` - The value to serialize
-* `indent` - Indentation spaces (default: 2, range: 0-8)
+**Parameters:**
+* `value` (any) - Value to serialize (map, list, string, number, boolean, nil)
+* `indent` (int, optional) - Indentation spaces (default: 2, range: 0-8)
 
-Example:
+**Returns:**
+* YAML-formatted string in block style
+
+**Serialization Rules:**
+* Maps → YAML mappings (key: value)
+* Lists → YAML sequences (- item)
+* Strings → plain or quoted (auto-detected)
+* Numbers → numeric scalars
+* Booleans → `true` or `false`
+* `nil` → `null`
+* Special characters in strings trigger quoting
+* Reserved indicators `@` and `` ` `` are quoted
+
+**Example:**
 ```cs
 let data = {"host": "localhost", "port": 8080, "tags": ["a", "b"]};
 let yaml = yaml_stringify(data);
@@ -982,7 +1120,28 @@ let yaml = yaml_stringify(data);
 // tags:
 //   - a
 //   - b
+
+// Custom indentation
+let yaml4 = yaml_stringify(data, 4);
+// host:    localhost
+// port:    8080
+// tags:
+//     -   a
+//     -   b
+
+// Handles special characters
+let special = {"path": "C:\\Users", "at": "@value"};
+let yaml_special = yaml_stringify(special);
+// path: "C:\\Users"
+// at: "@value"
 ```
+
+**Limitations:**
+* Does not generate anchors/aliases (use explicit YAML)
+* Does not generate tags (all values use implicit typing)
+* Always uses block style (not flow style)
+
+**See Also:** [Data-Formats](Data-Formats) for YAML details
 
 ### XML Functions
 

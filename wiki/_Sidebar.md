@@ -2,8 +2,9 @@
 
 **[Home](Home)**
 
-### Documentation
+### All Topics
 
+* [Wiki Home](Home)
 * [Getting Started](Getting-Started)
 * [Language Syntax](Language-Syntax)
 * [Types & Values](Types-and-Values)
@@ -25,7 +26,5 @@
 * [Host Safety Controls](Host-Safety-Controls)
 * [Tests](Tests)
 * [Data Formats](Data-Formats)
-
-### Advanced
-
+* [File Handling](File-Handling)
 * [Implementation Notes (Lexer/Parser/VM)](Implementation-Notes)
