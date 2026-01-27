@@ -2266,6 +2266,2983 @@ static int nf_json_stringify(cs_vm* vm, void* ud, int argc, const cs_value* argv
     return 0;
 }
 
+// ============================================================================
+// CSV Parser (RFC 4180 + extensions)
+// ============================================================================
+
+typedef struct {
+    const char* s;
+    size_t len;
+    size_t pos;
+    int row;
+    int col;
+    char delimiter;
+    char quote;
+    int skip_empty;
+    int trim;
+    cs_vm* vm;
+} csv_parser;
+
+static void csv_init(csv_parser* p, const char* s, size_t len, cs_vm* vm) {
+    p->s = s;
+    p->len = len;
+    p->pos = 0;
+    p->row = 1;
+    p->col = 1;
+    p->delimiter = ',';
+    p->quote = '"';
+    p->skip_empty = 0;
+    p->trim = 0;
+    p->vm = vm;
+}
+
+// Skip UTF-8 BOM if present
+static void csv_skip_bom(csv_parser* p) {
+    if (p->pos + 3 <= p->len &&
+        (unsigned char)p->s[p->pos] == 0xEF &&
+        (unsigned char)p->s[p->pos+1] == 0xBB &&
+        (unsigned char)p->s[p->pos+2] == 0xBF) {
+        p->pos += 3;
+    }
+}
+
+// Check if at end of line or end of file
+static int csv_at_eol(csv_parser* p) {
+    if (p->pos >= p->len) return 1;
+    char c = p->s[p->pos];
+    return (c == '\r' || c == '\n');
+}
+
+// Skip to end of line
+static void csv_skip_eol(csv_parser* p) {
+    if (p->pos >= p->len) return;
+    char c = p->s[p->pos];
+    if (c == '\r') {
+        p->pos++;
+        if (p->pos < p->len && p->s[p->pos] == '\n') p->pos++; // \r\n
+    } else if (c == '\n') {
+        p->pos++;
+    }
+    p->row++;
+    p->col = 1;
+}
+
+// Parse a single CSV field
+static cs_value csv_parse_field(csv_parser* p, int* ok) {
+    if (!ok) return cs_nil();
+    *ok = 1;
+
+    size_t start_col = p->col;
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+
+    // Check if field starts with quote
+    if (p->pos < p->len && p->s[p->pos] == p->quote) {
+        p->pos++;
+        p->col++;
+
+        // Quoted field
+        while (p->pos < p->len) {
+            char c = p->s[p->pos];
+            if (c == p->quote) {
+                p->pos++;
+                p->col++;
+                // Check for escaped quote (double quote)
+                if (p->pos < p->len && p->s[p->pos] == p->quote) {
+                    // Escaped quote - add single quote to field
+                    if (!sb_append(&buf, &len, &cap, &p->quote, 1)) {
+                        free(buf);
+                        cs_error(p->vm, "out of memory");
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                    p->pos++;
+                    p->col++;
+                } else {
+                    // End of quoted field
+                    break;
+                }
+            } else {
+                // Regular character (including newlines in quoted fields)
+                if (!sb_append(&buf, &len, &cap, &c, 1)) {
+                    free(buf);
+                    cs_error(p->vm, "out of memory");
+                    *ok = 0;
+                    return cs_nil();
+                }
+                p->pos++;
+                if (c == '\n') {
+                    p->row++;
+                    p->col = 1;
+                } else {
+                    p->col++;
+                }
+            }
+        }
+
+        // Check that we properly closed the quote
+        if (p->pos > 0 && p->s[p->pos-1] != p->quote) {
+            free(buf);
+            char err[256];
+            snprintf(err, sizeof(err), "unterminated quoted field at row %d, col %zu", p->row, start_col);
+            cs_error(p->vm, err);
+            *ok = 0;
+            return cs_nil();
+        }
+    } else {
+        // Unquoted field - read until delimiter or EOL
+        while (p->pos < p->len) {
+            char c = p->s[p->pos];
+            if (c == p->delimiter || c == '\r' || c == '\n') break;
+            if (!sb_append(&buf, &len, &cap, &c, 1)) {
+                free(buf);
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
+            p->pos++;
+            p->col++;
+        }
+    }
+
+    // Trim whitespace if requested
+    if (p->trim && buf && len > 0) {
+        // Trim leading whitespace
+        size_t start = 0;
+        while (start < len && isspace((unsigned char)buf[start])) start++;
+
+        // Trim trailing whitespace
+        size_t end = len;
+        while (end > start && isspace((unsigned char)buf[end-1])) end--;
+
+        if (start > 0 || end < len) {
+            size_t new_len = end - start;
+            if (new_len > 0) {
+                memmove(buf, buf + start, new_len);
+            }
+            len = new_len;
+        }
+    }
+
+    // Create string value
+    if (!buf) buf = cs_strdup2_local("");
+    if (!buf) {
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+    buf[len] = '\0';
+    return cs_str_take(p->vm, buf, (uint64_t)len);
+}
+
+// Parse a single CSV row
+static cs_value csv_parse_row(csv_parser* p, int* ok) {
+    if (!ok) return cs_nil();
+    *ok = 1;
+
+    cs_value row = cs_list(p->vm);
+    if (row.type != CS_T_LIST) {
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    int first_field = 1;
+    while (p->pos < p->len && !csv_at_eol(p)) {
+        // Add delimiter check (skip delimiter except before first field)
+        if (!first_field) {
+            if (p->pos < p->len && p->s[p->pos] == p->delimiter) {
+                p->pos++;
+                p->col++;
+            }
+        }
+        first_field = 0;
+
+        cs_value field = csv_parse_field(p, ok);
+        if (!*ok) {
+            cs_value_release(row);
+            return cs_nil();
+        }
+
+        cs_list_push(row, field);
+        cs_value_release(field);
+
+        // Check if we're at delimiter or EOL
+        if (p->pos < p->len && p->s[p->pos] == p->delimiter) {
+            // More fields coming
+            continue;
+        } else {
+            // End of row
+            break;
+        }
+    }
+
+    return row;
+}
+
+static int nf_csv_parse(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1 || argv[0].type != CS_T_STR) {
+        cs_error(vm, "csv_parse() requires a string argument");
+        return 1;
+    }
+
+    cs_string* str_obj = (cs_string*)argv[0].as.p;
+    const char* text = str_obj->data;
+    size_t text_len = str_obj->len;
+
+    csv_parser p;
+    csv_init(&p, text, text_len, vm);
+
+    // Parse options if provided
+    int use_headers = 0;
+    if (argc >= 2 && argv[1].type == CS_T_MAP) {
+        cs_value opt_delimiter = cs_map_get(argv[1], "delimiter");
+        if (opt_delimiter.type == CS_T_STR) {
+            cs_string* delim_str = (cs_string*)opt_delimiter.as.p;
+            if (delim_str->len == 1) {
+                p.delimiter = delim_str->data[0];
+            }
+        }
+        cs_value_release(opt_delimiter);
+
+        cs_value opt_quote = cs_map_get(argv[1], "quote");
+        if (opt_quote.type == CS_T_STR) {
+            cs_string* quote_str = (cs_string*)opt_quote.as.p;
+            if (quote_str->len == 1) {
+                p.quote = quote_str->data[0];
+            }
+        }
+        cs_value_release(opt_quote);
+
+        cs_value opt_headers = cs_map_get(argv[1], "headers");
+        if (opt_headers.type == CS_T_BOOL) {
+            use_headers = opt_headers.as.b;
+        }
+        cs_value_release(opt_headers);
+
+        cs_value opt_skip_empty = cs_map_get(argv[1], "skip_empty");
+        if (opt_skip_empty.type == CS_T_BOOL) {
+            p.skip_empty = opt_skip_empty.as.b;
+        }
+        cs_value_release(opt_skip_empty);
+
+        cs_value opt_trim = cs_map_get(argv[1], "trim");
+        if (opt_trim.type == CS_T_BOOL) {
+            p.trim = opt_trim.as.b;
+        }
+        cs_value_release(opt_trim);
+    }
+
+    // Skip BOM if present
+    csv_skip_bom(&p);
+
+    // Parse all rows
+    cs_value rows = cs_list(vm);
+    if (rows.type != CS_T_LIST) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+
+    cs_value header_row = cs_nil();
+    int first_row = 1;
+
+    while (p.pos < p.len) {
+        // Handle empty lines
+        if (csv_at_eol(&p)) {
+            if (p.skip_empty) {
+                csv_skip_eol(&p);
+                continue;
+            } else {
+                // Parse as empty row (single empty field)
+                cs_value empty_row = cs_list(vm);
+                if (empty_row.type != CS_T_LIST) {
+                    cs_value_release(rows);
+                    cs_value_release(header_row);
+                    cs_error(vm, "out of memory");
+                    return 1;
+                }
+                cs_value empty_field = cs_str(vm, "");
+                cs_list_push(empty_row, empty_field);
+                cs_value_release(empty_field);
+
+                if (first_row && use_headers) {
+                    header_row = empty_row;
+                    first_row = 0;
+                } else {
+                    cs_list_push(rows, empty_row);
+                    cs_value_release(empty_row);
+                    first_row = 0;
+                }
+
+                csv_skip_eol(&p);
+                continue;
+            }
+        }
+
+        int ok = 1;
+        cs_value row = csv_parse_row(&p, &ok);
+        if (!ok) {
+            cs_value_release(rows);
+            cs_value_release(header_row);
+            return 1;
+        }
+
+        // Check if this is an empty row
+        int is_empty = 1;
+        size_t row_len = cs_list_len(row);
+        for (size_t i = 0; i < row_len; i++) {
+            cs_value field = cs_list_get(row, i);
+            if (field.type == CS_T_STR) {
+                cs_string* s = (cs_string*)field.as.p;
+                if (s->len > 0) {
+                    is_empty = 0;
+                }
+            }
+            cs_value_release(field);
+            if (!is_empty) break;
+        }
+
+        if (is_empty && p.skip_empty) {
+            cs_value_release(row);
+            csv_skip_eol(&p);
+            continue;
+        }
+
+        // Handle header mode
+        if (first_row && use_headers) {
+            header_row = row;
+            first_row = 0;
+            csv_skip_eol(&p);
+            continue;
+        }
+
+        // Convert row to map if using headers
+        if (use_headers && header_row.type == CS_T_LIST) {
+            cs_value map_row = cs_map(vm);
+            if (map_row.type != CS_T_MAP) {
+                cs_value_release(row);
+                cs_value_release(rows);
+                cs_value_release(header_row);
+                cs_error(vm, "out of memory");
+                return 1;
+            }
+
+            size_t header_len = cs_list_len(header_row);
+            row_len = cs_list_len(row);
+            for (size_t i = 0; i < row_len && i < header_len; i++) {
+                cs_value key = cs_list_get(header_row, i);
+                cs_value val = cs_list_get(row, i);
+
+                if (key.type == CS_T_STR) {
+                    cs_string* key_str = (cs_string*)key.as.p;
+                    cs_map_set(map_row, key_str->data, val);
+                }
+
+                cs_value_release(key);
+                cs_value_release(val);
+            }
+
+            cs_list_push(rows, map_row);
+            cs_value_release(map_row);
+            cs_value_release(row);
+        } else {
+            cs_list_push(rows, row);
+            cs_value_release(row);
+        }
+
+        first_row = 0;
+        csv_skip_eol(&p);
+    }
+
+    cs_value_release(header_row);
+    *out = rows;
+    return 0;
+}
+
+static int nf_csv_stringify(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1 || argv[0].type != CS_T_LIST) {
+        cs_error(vm, "csv_stringify() requires a list argument");
+        return 1;
+    }
+
+    char delimiter = ',';
+    char quote = '"';
+
+    // Parse options if provided
+    if (argc >= 2 && argv[1].type == CS_T_MAP) {
+        cs_value opt_delimiter = cs_map_get(argv[1], "delimiter");
+        if (opt_delimiter.type == CS_T_STR) {
+            cs_string* delim_str = (cs_string*)opt_delimiter.as.p;
+            if (delim_str->len == 1) {
+                delimiter = delim_str->data[0];
+            }
+        }
+        cs_value_release(opt_delimiter);
+
+        cs_value opt_quote = cs_map_get(argv[1], "quote");
+        if (opt_quote.type == CS_T_STR) {
+            cs_string* quote_str = (cs_string*)opt_quote.as.p;
+            if (quote_str->len == 1) {
+                quote = quote_str->data[0];
+            }
+        }
+        cs_value_release(opt_quote);
+    }
+
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+
+    size_t num_rows = cs_list_len(argv[0]);
+    for (size_t r = 0; r < num_rows; r++) {
+        cs_value row = cs_list_get(argv[0], r);
+
+        // Handle both list of lists and list of maps
+        cs_value fields_list = cs_nil();
+        int is_map = 0;
+
+        if (row.type == CS_T_LIST) {
+            fields_list = row;
+        } else if (row.type == CS_T_MAP) {
+            // Convert map to list of values
+            is_map = 1;
+            cs_value keys = cs_map_keys(vm, row);
+            if (keys.type != CS_T_LIST) {
+                cs_value_release(row);
+                free(buf);
+                cs_error(vm, "out of memory");
+                return 1;
+            }
+
+            fields_list = cs_list(vm);
+            if (fields_list.type != CS_T_LIST) {
+                cs_value_release(row);
+                cs_value_release(keys);
+                free(buf);
+                cs_error(vm, "out of memory");
+                return 1;
+            }
+
+            // Add values in key order
+            size_t num_keys = cs_list_len(keys);
+            for (size_t k = 0; k < num_keys; k++) {
+                cs_value key = cs_list_get(keys, k);
+                if (key.type == CS_T_STR) {
+                    cs_string* key_str = (cs_string*)key.as.p;
+                    cs_value val = cs_map_get(row, key_str->data);
+                    cs_list_push(fields_list, val);
+                    cs_value_release(val);
+                }
+                cs_value_release(key);
+            }
+            cs_value_release(keys);
+        } else {
+            cs_value_release(row);
+            continue; // Skip non-list/map rows
+        }
+
+        size_t num_fields = cs_list_len(fields_list);
+        for (size_t f = 0; f < num_fields; f++) {
+            if (f > 0) {
+                // Add delimiter between fields
+                if (!sb_append(&buf, &len, &cap, &delimiter, 1)) {
+                    if (is_map) cs_value_release(fields_list);
+                    cs_value_release(row);
+                    free(buf);
+                    cs_error(vm, "out of memory");
+                    return 1;
+                }
+            }
+
+            cs_value field = cs_list_get(fields_list, f);
+
+            // Convert field to string
+            const char* field_str = NULL;
+            char tmp[128];
+
+            if (field.type == CS_T_STR) {
+                cs_string* s = (cs_string*)field.as.p;
+                field_str = s->data;
+            } else if (field.type == CS_T_INT) {
+                snprintf(tmp, sizeof(tmp), "%lld", (long long)field.as.i);
+                field_str = tmp;
+            } else if (field.type == CS_T_FLOAT) {
+                snprintf(tmp, sizeof(tmp), "%g", field.as.f);
+                field_str = tmp;
+            } else if (field.type == CS_T_BOOL) {
+                field_str = field.as.b ? "true" : "false";
+            } else if (field.type == CS_T_NIL) {
+                field_str = "";
+            } else {
+                field_str = "";
+            }
+
+            // Check if field needs quoting (contains delimiter, quote, or newline)
+            int needs_quote = 0;
+            for (const char* p = field_str; *p; p++) {
+                if (*p == delimiter || *p == quote || *p == '\r' || *p == '\n') {
+                    needs_quote = 1;
+                    break;
+                }
+            }
+
+            if (needs_quote) {
+                // Add opening quote
+                if (!sb_append(&buf, &len, &cap, &quote, 1)) {
+                    cs_value_release(field);
+                    if (is_map) cs_value_release(fields_list);
+                    cs_value_release(row);
+                    free(buf);
+                    cs_error(vm, "out of memory");
+                    return 1;
+                }
+
+                // Add field content, escaping quotes
+                for (const char* p = field_str; *p; p++) {
+                    if (*p == quote) {
+                        // Escape quote by doubling it
+                        if (!sb_append(&buf, &len, &cap, &quote, 1)) {
+                            cs_value_release(field);
+                            if (is_map) cs_value_release(fields_list);
+                            cs_value_release(row);
+                            free(buf);
+                            cs_error(vm, "out of memory");
+                            return 1;
+                        }
+                    }
+                    if (!sb_append(&buf, &len, &cap, p, 1)) {
+                        cs_value_release(field);
+                        if (is_map) cs_value_release(fields_list);
+                        cs_value_release(row);
+                        free(buf);
+                        cs_error(vm, "out of memory");
+                        return 1;
+                    }
+                }
+
+                // Add closing quote
+                if (!sb_append(&buf, &len, &cap, &quote, 1)) {
+                    cs_value_release(field);
+                    if (is_map) cs_value_release(fields_list);
+                    cs_value_release(row);
+                    free(buf);
+                    cs_error(vm, "out of memory");
+                    return 1;
+                }
+            } else {
+                // No quoting needed - add field as-is
+                size_t field_len = strlen(field_str);
+                if (!sb_append(&buf, &len, &cap, field_str, field_len)) {
+                    cs_value_release(field);
+                    if (is_map) cs_value_release(fields_list);
+                    cs_value_release(row);
+                    free(buf);
+                    cs_error(vm, "out of memory");
+                    return 1;
+                }
+            }
+
+            cs_value_release(field);
+        }
+
+        if (is_map) cs_value_release(fields_list);
+        cs_value_release(row);
+
+        // Add newline after each row
+        if (!sb_append(&buf, &len, &cap, "\n", 1)) {
+            free(buf);
+            cs_error(vm, "out of memory");
+            return 1;
+        }
+    }
+
+    if (!buf) buf = cs_strdup2_local("");
+    if (!buf) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    *out = cs_str_take(vm, buf, (uint64_t)len);
+    return 0;
+}
+
+// ============================================================================
+// YAML Parser (YAML 1.2 specification)
+// ============================================================================
+
+#define YAML_MAX_ANCHORS 256
+#define YAML_MAX_INDENT_DEPTH 64
+
+typedef struct {
+    char* name;
+    cs_value value;
+} yaml_anchor;
+
+typedef struct {
+    const char* s;
+    size_t len;
+    size_t pos;
+    int line;
+    int col;
+    int indent_stack[YAML_MAX_INDENT_DEPTH];
+    int indent_depth;
+    cs_vm* vm;
+    yaml_anchor anchors[YAML_MAX_ANCHORS];
+    size_t anchor_count;
+} yaml_parser;
+
+static void yaml_init(yaml_parser* p, const char* s, size_t len, cs_vm* vm) {
+    p->s = s;
+    p->len = len;
+    p->pos = 0;
+    p->line = 1;
+    p->col = 1;
+    p->indent_depth = 0;
+    p->vm = vm;
+    p->anchor_count = 0;
+    for (size_t i = 0; i < YAML_MAX_INDENT_DEPTH; i++) {
+        p->indent_stack[i] = -1;
+    }
+}
+
+static void yaml_cleanup(yaml_parser* p) {
+    for (size_t i = 0; i < p->anchor_count; i++) {
+        free(p->anchors[i].name);
+        cs_value_release(p->anchors[i].value);
+    }
+}
+
+static int yaml_peek(yaml_parser* p) {
+    if (p->pos >= p->len) return -1;
+    return (unsigned char)p->s[p->pos];
+}
+
+static int yaml_advance(yaml_parser* p) {
+    if (p->pos >= p->len) return -1;
+    int ch = (unsigned char)p->s[p->pos++];
+    if (ch == '\n') {
+        p->line++;
+        p->col = 1;
+    } else {
+        p->col++;
+    }
+    return ch;
+}
+
+static void yaml_skip_ws_inline(yaml_parser* p) {
+    while (p->pos < p->len) {
+        int ch = yaml_peek(p);
+        if (ch == ' ') {
+            yaml_advance(p);
+        } else {
+            break;
+        }
+    }
+}
+
+static void yaml_skip_comment(yaml_parser* p) {
+    if (yaml_peek(p) == '#') {
+        while (p->pos < p->len && yaml_peek(p) != '\n') {
+            yaml_advance(p);
+        }
+    }
+}
+
+static void yaml_skip_ws_and_comments(yaml_parser* p) {
+    while (p->pos < p->len) {
+        int ch = yaml_peek(p);
+        if (ch == ' ' || ch == '\t') {
+            yaml_advance(p);
+        } else if (ch == '#') {
+            yaml_skip_comment(p);
+        } else {
+            break;
+        }
+    }
+}
+
+static int yaml_get_indent(yaml_parser* p) {
+    int indent = 0;
+    size_t start_pos = p->pos;
+    while (p->pos < p->len) {
+        int ch = yaml_peek(p);
+        if (ch == ' ') {
+            indent++;
+            yaml_advance(p);
+        } else if (ch == '\t') {
+            // Tabs not allowed in indentation per YAML spec
+            cs_error(p->vm, "tabs not allowed in YAML indentation");
+            p->pos = start_pos;
+            return -1;
+        } else {
+            break;
+        }
+    }
+    p->pos = start_pos; // Reset position
+    return indent;
+}
+
+static int yaml_skip_to_indent(yaml_parser* p, int expected_indent) {
+    while (p->pos < p->len) {
+        int ch = yaml_peek(p);
+        if (ch == '\n') {
+            yaml_advance(p);
+            int indent = yaml_get_indent(p);
+            if (indent == expected_indent) {
+                // Skip the actual indentation
+                for (int i = 0; i < indent && p->pos < p->len; i++) {
+                    yaml_advance(p);
+                }
+                return 1;
+            }
+        } else {
+            break;
+        }
+    }
+    return 0;
+}
+
+static cs_value yaml_parse_null(yaml_parser* p, const char* str, size_t len) {
+    if (len == 0) return cs_str(p->vm, "");
+
+    if ((len == 4 && strncmp(str, "null", 4) == 0) ||
+        (len == 1 && str[0] == '~')) {
+        return cs_nil();
+    }
+
+    return cs_nil(); // Will be overridden if not null
+}
+
+static cs_value yaml_parse_bool(yaml_parser* p, const char* str, size_t len, int* is_bool) {
+    *is_bool = 0;
+
+    if (len == 4 && strncmp(str, "true", 4) == 0) {
+        *is_bool = 1;
+        return cs_bool(1);
+    }
+    if (len == 5 && strncmp(str, "false", 5) == 0) {
+        *is_bool = 1;
+        return cs_bool(0);
+    }
+    if (len == 3 && strncmp(str, "yes", 3) == 0) {
+        *is_bool = 1;
+        return cs_bool(1);
+    }
+    if (len == 2 && strncmp(str, "no", 2) == 0) {
+        *is_bool = 1;
+        return cs_bool(0);
+    }
+    if (len == 2 && strncmp(str, "on", 2) == 0) {
+        *is_bool = 1;
+        return cs_bool(1);
+    }
+    if (len == 3 && strncmp(str, "off", 3) == 0) {
+        *is_bool = 1;
+        return cs_bool(0);
+    }
+
+    return cs_nil();
+}
+
+static cs_value yaml_parse_number(yaml_parser* p, const char* str, size_t len, int* is_number) {
+    *is_number = 0;
+
+    if (len == 0) return cs_nil();
+
+    // Check for special float values
+    if (len == 4 && strncmp(str, ".inf", 4) == 0) {
+        *is_number = 1;
+        return cs_float(1.0 / 0.0);
+    }
+    if (len == 5 && strncmp(str, "-.inf", 5) == 0) {
+        *is_number = 1;
+        return cs_float(-1.0 / 0.0);
+    }
+    if (len == 4 && strncmp(str, ".nan", 4) == 0) {
+        *is_number = 1;
+        return cs_float(0.0 / 0.0);
+    }
+
+    // Try to parse as number
+    char* end = NULL;
+    char buf[256];
+    if (len >= sizeof(buf)) return cs_nil();
+    memcpy(buf, str, len);
+    buf[len] = '\0';
+
+    // Check for hex (0x prefix)
+    if (len > 2 && buf[0] == '0' && (buf[1] == 'x' || buf[1] == 'X')) {
+        long long val = strtoll(buf, &end, 16);
+        if (end && *end == '\0') {
+            *is_number = 1;
+            return cs_int(val);
+        }
+    }
+
+    // Check for octal (0o prefix)
+    if (len > 2 && buf[0] == '0' && (buf[1] == 'o' || buf[1] == 'O')) {
+        long long val = strtoll(buf + 2, &end, 8);
+        if (end && *end == '\0') {
+            *is_number = 1;
+            return cs_int(val);
+        }
+    }
+
+    // Try integer
+    long long ival = strtoll(buf, &end, 10);
+    if (end && *end == '\0') {
+        *is_number = 1;
+        return cs_int(ival);
+    }
+
+    // Try float
+    double fval = strtod(buf, &end);
+    if (end && *end == '\0') {
+        *is_number = 1;
+        return cs_float(fval);
+    }
+
+    return cs_nil();
+}
+
+static cs_value yaml_parse_plain_scalar(yaml_parser* p, int* ok);
+static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok);
+
+static cs_value yaml_parse_quoted_string(yaml_parser* p, char quote_char, int* ok) {
+    *ok = 1;
+    yaml_advance(p); // Skip opening quote
+
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+
+    while (p->pos < p->len) {
+        int ch = yaml_peek(p);
+
+        if (ch == quote_char) {
+            yaml_advance(p);
+            // Check for escaped quote (double quote)
+            if (quote_char == '"' && yaml_peek(p) == '"') {
+                yaml_advance(p);
+                if (!sb_append(&buf, &len, &cap, "\"", 1)) {
+                    free(buf);
+                    cs_error(p->vm, "out of memory");
+                    *ok = 0;
+                    return cs_nil();
+                }
+                continue;
+            }
+            // End of string
+            if (!buf) buf = cs_strdup2_local("");
+            if (!buf) {
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
+            return cs_str_take(p->vm, buf, (uint64_t)len);
+        }
+
+        yaml_advance(p);
+
+        if (ch == '\\' && quote_char == '"') {
+            // Handle escape sequences in double-quoted strings
+            int next = yaml_peek(p);
+            if (next == -1) break;
+            yaml_advance(p);
+
+            char esc;
+            switch (next) {
+                case '0': esc = '\0'; break;
+                case 'a': esc = '\a'; break;
+                case 'b': esc = '\b'; break;
+                case 't': esc = '\t'; break;
+                case 'n': esc = '\n'; break;
+                case 'v': esc = '\v'; break;
+                case 'f': esc = '\f'; break;
+                case 'r': esc = '\r'; break;
+                case 'e': esc = '\x1B'; break;
+                case ' ': esc = ' '; break;
+                case '"': esc = '"'; break;
+                case '/': esc = '/'; break;
+                case '\\': esc = '\\'; break;
+                default:
+                    esc = (char)next;
+                    break;
+            }
+
+            if (!sb_append(&buf, &len, &cap, &esc, 1)) {
+                free(buf);
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
+        } else {
+            char c = (char)ch;
+            if (!sb_append(&buf, &len, &cap, &c, 1)) {
+                free(buf);
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
+        }
+    }
+
+    free(buf);
+    cs_error(p->vm, "unterminated quoted string");
+    *ok = 0;
+    return cs_nil();
+}
+
+static cs_value yaml_parse_multiline(yaml_parser* p, char style, int base_indent, int* ok) {
+    *ok = 1;
+    yaml_advance(p); // Skip | or >
+
+    // Skip optional chomping/indentation indicators
+    yaml_skip_ws_inline(p);
+
+    // Skip to next line
+    if (yaml_peek(p) != '\n') {
+        yaml_skip_comment(p);
+    }
+    if (yaml_peek(p) == '\n') {
+        yaml_advance(p);
+    }
+
+    // Determine content indent (first non-empty line)
+    int content_indent = -1;
+    size_t scan_pos = p->pos;
+    while (scan_pos < p->len) {
+        int indent = 0;
+        while (scan_pos < p->len && p->s[scan_pos] == ' ') {
+            indent++;
+            scan_pos++;
+        }
+        if (scan_pos < p->len && p->s[scan_pos] != '\n') {
+            content_indent = indent;
+            break;
+        }
+        if (scan_pos < p->len && p->s[scan_pos] == '\n') {
+            scan_pos++;
+        }
+    }
+
+    if (content_indent <= base_indent) {
+        content_indent = base_indent + 2;
+    }
+
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+
+    int first_line = 1;
+    while (p->pos < p->len) {
+        // Check indent
+        int indent = 0;
+        while (p->pos < p->len && yaml_peek(p) == ' ') {
+            indent++;
+            yaml_advance(p);
+        }
+
+        // End of multiline block if indent is less than content indent
+        if (p->pos < p->len && yaml_peek(p) != '\n' && indent < content_indent) {
+            break;
+        }
+
+        // Empty line
+        if (yaml_peek(p) == '\n') {
+            if (style == '|') {
+                if (!sb_append(&buf, &len, &cap, "\n", 1)) {
+                    free(buf);
+                    cs_error(p->vm, "out of memory");
+                    *ok = 0;
+                    return cs_nil();
+                }
+            } else {
+                if (!sb_append(&buf, &len, &cap, "\n", 1)) {
+                    free(buf);
+                    cs_error(p->vm, "out of memory");
+                    *ok = 0;
+                    return cs_nil();
+                }
+            }
+            yaml_advance(p);
+            continue;
+        }
+
+        // Add line separator for folded style
+        if (style == '>' && !first_line) {
+            if (!sb_append(&buf, &len, &cap, " ", 1)) {
+                free(buf);
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
+        } else if (style == '|' && !first_line) {
+            if (!sb_append(&buf, &len, &cap, "\n", 1)) {
+                free(buf);
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
+        }
+        first_line = 0;
+
+        // Read line content
+        while (p->pos < p->len && yaml_peek(p) != '\n') {
+            char c = (char)yaml_advance(p);
+            if (!sb_append(&buf, &len, &cap, &c, 1)) {
+                free(buf);
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
+        }
+
+        if (yaml_peek(p) == '\n') {
+            yaml_advance(p);
+        }
+    }
+
+    // Add final newline for literal style
+    if (style == '|' && len > 0) {
+        if (!sb_append(&buf, &len, &cap, "\n", 1)) {
+            free(buf);
+            cs_error(p->vm, "out of memory");
+            *ok = 0;
+            return cs_nil();
+        }
+    } else if (style == '>' && len > 0) {
+        if (!sb_append(&buf, &len, &cap, "\n", 1)) {
+            free(buf);
+            cs_error(p->vm, "out of memory");
+            *ok = 0;
+            return cs_nil();
+        }
+    }
+
+    if (!buf) buf = cs_strdup2_local("");
+    if (!buf) {
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+    return cs_str_take(p->vm, buf, (uint64_t)len);
+}
+
+static cs_value yaml_parse_flow_list(yaml_parser* p, int* ok) {
+    *ok = 1;
+    yaml_advance(p); // Skip [
+
+    cs_value list = cs_list(p->vm);
+    if (list.type != CS_T_LIST) {
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    yaml_skip_ws_and_comments(p);
+
+    if (yaml_peek(p) == ']') {
+        yaml_advance(p);
+        return list;
+    }
+
+    while (p->pos < p->len) {
+        yaml_skip_ws_and_comments(p);
+
+        if (yaml_peek(p) == ']') {
+            yaml_advance(p);
+            return list;
+        }
+
+        cs_value item = yaml_parse_value(p, -1, ok);
+        if (!*ok) {
+            cs_value_release(list);
+            return cs_nil();
+        }
+
+        cs_list_push(list, item);
+        cs_value_release(item);
+
+        yaml_skip_ws_and_comments(p);
+
+        if (yaml_peek(p) == ',') {
+            yaml_advance(p);
+        } else if (yaml_peek(p) == ']') {
+            yaml_advance(p);
+            return list;
+        }
+    }
+
+    cs_value_release(list);
+    cs_error(p->vm, "unterminated flow list");
+    *ok = 0;
+    return cs_nil();
+}
+
+static cs_value yaml_parse_flow_map(yaml_parser* p, int* ok) {
+    *ok = 1;
+    yaml_advance(p); // Skip {
+
+    cs_value map = cs_map(p->vm);
+    if (map.type != CS_T_MAP) {
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    yaml_skip_ws_and_comments(p);
+
+    if (yaml_peek(p) == '}') {
+        yaml_advance(p);
+        return map;
+    }
+
+    while (p->pos < p->len) {
+        yaml_skip_ws_and_comments(p);
+
+        if (yaml_peek(p) == '}') {
+            yaml_advance(p);
+            return map;
+        }
+
+        // Parse key
+        cs_value key = yaml_parse_value(p, -1, ok);
+        if (!*ok) {
+            cs_value_release(map);
+            return cs_nil();
+        }
+
+        yaml_skip_ws_and_comments(p);
+
+        if (yaml_peek(p) != ':') {
+            cs_value_release(key);
+            cs_value_release(map);
+            cs_error(p->vm, "expected ':' in flow map");
+            *ok = 0;
+            return cs_nil();
+        }
+        yaml_advance(p);
+
+        yaml_skip_ws_and_comments(p);
+
+        // Parse value
+        cs_value val = yaml_parse_value(p, -1, ok);
+        if (!*ok) {
+            cs_value_release(key);
+            cs_value_release(map);
+            return cs_nil();
+        }
+
+        // Set in map
+        if (key.type == CS_T_STR) {
+            cs_string* key_str = (cs_string*)key.as.p;
+            cs_map_set(map, key_str->data, val);
+        }
+
+        cs_value_release(key);
+        cs_value_release(val);
+
+        yaml_skip_ws_and_comments(p);
+
+        if (yaml_peek(p) == ',') {
+            yaml_advance(p);
+        } else if (yaml_peek(p) == '}') {
+            yaml_advance(p);
+            return map;
+        }
+    }
+
+    cs_value_release(map);
+    cs_error(p->vm, "unterminated flow map");
+    *ok = 0;
+    return cs_nil();
+}
+
+static cs_value yaml_parse_plain_scalar(yaml_parser* p, int* ok) {
+    *ok = 1;
+
+    size_t start = p->pos;
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+
+    while (p->pos < p->len) {
+        int ch = yaml_peek(p);
+
+        // End conditions
+        if (ch == '\n' || ch == ':' || ch == '#' || ch == ',' || ch == ']' || ch == '}' || ch == -1) {
+            // Special handling for ':' - must be followed by space or EOL
+            if (ch == ':') {
+                size_t save_pos = p->pos;
+                yaml_advance(p);
+                int next = yaml_peek(p);
+                p->pos = save_pos;
+                if (next == ' ' || next == '\n' || next == '\t' || next == -1) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        char c = (char)yaml_advance(p);
+        if (!sb_append(&buf, &len, &cap, &c, 1)) {
+            free(buf);
+            cs_error(p->vm, "out of memory");
+            *ok = 0;
+            return cs_nil();
+        }
+    }
+
+    // Trim trailing whitespace
+    while (len > 0 && (buf[len-1] == ' ' || buf[len-1] == '\t')) {
+        len--;
+    }
+
+    if (!buf || len == 0) {
+        free(buf);
+        return cs_str(p->vm, "");
+    }
+
+    // Check if this is a special value
+    if ((len == 4 && strncmp(buf, "null", 4) == 0) ||
+        (len == 1 && buf[0] == '~')) {
+        free(buf);
+        return cs_nil();
+    }
+
+    // Check for boolean
+    int is_bool = 0;
+    cs_value bool_val = yaml_parse_bool(p, buf, len, &is_bool);
+    if (is_bool) {
+        free(buf);
+        return bool_val;
+    }
+
+    // Check for number
+    int is_number = 0;
+    cs_value num_val = yaml_parse_number(p, buf, len, &is_number);
+    if (is_number) {
+        free(buf);
+        return num_val;
+    }
+
+    // Return as string
+    buf[len] = '\0';
+    return cs_str_take(p->vm, buf, (uint64_t)len);
+}
+
+static cs_value yaml_parse_alias(yaml_parser* p, int* ok) {
+    *ok = 1;
+    yaml_advance(p); // Skip *
+
+    size_t start = p->pos;
+    while (p->pos < p->len) {
+        int ch = yaml_peek(p);
+        if (ch == ' ' || ch == '\n' || ch == '\t' || ch == ',' || ch == ']' || ch == '}' || ch == ':' || ch == '#') {
+            break;
+        }
+        yaml_advance(p);
+    }
+
+    size_t name_len = p->pos - start;
+    if (name_len == 0) {
+        cs_error(p->vm, "empty alias name");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    // Look up anchor
+    for (size_t i = 0; i < p->anchor_count; i++) {
+        if (strlen(p->anchors[i].name) == name_len &&
+            strncmp(p->anchors[i].name, p->s + start, name_len) == 0) {
+            return cs_value_copy(p->anchors[i].value);
+        }
+    }
+
+    cs_error(p->vm, "undefined alias");
+    *ok = 0;
+    return cs_nil();
+}
+
+static cs_value yaml_parse_list(yaml_parser* p, int base_indent, int* ok) {
+    *ok = 1;
+
+    cs_value list = cs_list(p->vm);
+    if (list.type != CS_T_LIST) {
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    while (p->pos < p->len) {
+        // Check current indent
+        int indent = yaml_get_indent(p);
+        if (indent < base_indent) {
+            break;
+        }
+        if (indent > base_indent) {
+            // Skip over-indented lines
+            yaml_advance(p);
+            continue;
+        }
+
+        // Skip indent
+        for (int i = 0; i < indent && p->pos < p->len; i++) {
+            yaml_advance(p);
+        }
+
+        // Check for list marker
+        if (yaml_peek(p) != '-') {
+            break;
+        }
+
+        // Look ahead to ensure it's followed by space or newline
+        size_t save_pos = p->pos;
+        yaml_advance(p);
+        int next = yaml_peek(p);
+        if (next != ' ' && next != '\n' && next != '\t' && next != -1) {
+            p->pos = save_pos;
+            break;
+        }
+
+        yaml_skip_ws_inline(p);
+        yaml_skip_comment(p);
+
+        // If end of line, item is on next line(s)
+        if (yaml_peek(p) == '\n') {
+            yaml_advance(p);
+            cs_value item = yaml_parse_value(p, indent + 2, ok);
+            if (!*ok) {
+                cs_value_release(list);
+                return cs_nil();
+            }
+            cs_list_push(list, item);
+            cs_value_release(item);
+        } else {
+            // Item is inline
+            cs_value item = yaml_parse_value(p, indent + 2, ok);
+            if (!*ok) {
+                cs_value_release(list);
+                return cs_nil();
+            }
+            cs_list_push(list, item);
+            cs_value_release(item);
+
+            // Skip to end of line
+            yaml_skip_ws_inline(p);
+            yaml_skip_comment(p);
+            if (yaml_peek(p) == '\n') {
+                yaml_advance(p);
+            }
+        }
+    }
+
+    return list;
+}
+
+static cs_value yaml_parse_map(yaml_parser* p, int base_indent, int* ok) {
+    *ok = 1;
+
+    cs_value map = cs_map(p->vm);
+    if (map.type != CS_T_MAP) {
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    while (p->pos < p->len) {
+        // Check current indent
+        int indent = yaml_get_indent(p);
+        if (indent < base_indent) {
+            break;
+        }
+        if (indent > base_indent) {
+            break;
+        }
+
+        // Skip indent
+        for (int i = 0; i < indent && p->pos < p->len; i++) {
+            yaml_advance(p);
+        }
+
+        yaml_skip_ws_inline(p);
+
+        // Empty line or comment
+        if (yaml_peek(p) == '\n' || yaml_peek(p) == '#') {
+            if (yaml_peek(p) == '#') {
+                yaml_skip_comment(p);
+            }
+            if (yaml_peek(p) == '\n') {
+                yaml_advance(p);
+            }
+            continue;
+        }
+
+        // Check for list marker (not a map)
+        if (yaml_peek(p) == '-') {
+            size_t save = p->pos;
+            yaml_advance(p);
+            int next = yaml_peek(p);
+            p->pos = save;
+            if (next == ' ' || next == '\n' || next == '\t') {
+                break;
+            }
+        }
+
+        // Parse key
+        cs_value key = yaml_parse_plain_scalar(p, ok);
+        if (!*ok) {
+            cs_value_release(map);
+            return cs_nil();
+        }
+
+        yaml_skip_ws_inline(p);
+
+        // Expect colon
+        if (yaml_peek(p) != ':') {
+            cs_value_release(key);
+            cs_value_release(map);
+            break;
+        }
+        yaml_advance(p);
+
+        yaml_skip_ws_inline(p);
+        yaml_skip_comment(p);
+
+        // Parse value
+        cs_value val;
+        if (yaml_peek(p) == '\n') {
+            yaml_advance(p);
+            val = yaml_parse_value(p, base_indent + 2, ok);
+        } else {
+            val = yaml_parse_value(p, base_indent, ok);
+        }
+
+        if (!*ok) {
+            cs_value_release(key);
+            cs_value_release(map);
+            return cs_nil();
+        }
+
+        // Set in map
+        if (key.type == CS_T_STR) {
+            cs_string* key_str = (cs_string*)key.as.p;
+            cs_map_set(map, key_str->data, val);
+        }
+
+        cs_value_release(key);
+        cs_value_release(val);
+
+        // Skip to end of line
+        yaml_skip_ws_inline(p);
+        yaml_skip_comment(p);
+        if (yaml_peek(p) == '\n') {
+            yaml_advance(p);
+        }
+    }
+
+    return map;
+}
+
+static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
+    *ok = 1;
+
+    yaml_skip_ws_inline(p);
+
+    int ch = yaml_peek(p);
+
+    if (ch == -1) {
+        return cs_nil();
+    }
+
+    // Flow list
+    if (ch == '[') {
+        return yaml_parse_flow_list(p, ok);
+    }
+
+    // Flow map
+    if (ch == '{') {
+        return yaml_parse_flow_map(p, ok);
+    }
+
+    // Alias
+    if (ch == '*') {
+        return yaml_parse_alias(p, ok);
+    }
+
+    // Anchor (store it but parse the value)
+    char* anchor_name = NULL;
+    if (ch == '&') {
+        yaml_advance(p);
+        size_t start = p->pos;
+        while (p->pos < p->len) {
+            int c = yaml_peek(p);
+            if (c == ' ' || c == '\n' || c == '\t' || c == ':' || c == ',') {
+                break;
+            }
+            yaml_advance(p);
+        }
+        size_t name_len = p->pos - start;
+        if (name_len > 0) {
+            anchor_name = (char*)malloc(name_len + 1);
+            if (anchor_name) {
+                memcpy(anchor_name, p->s + start, name_len);
+                anchor_name[name_len] = '\0';
+            }
+        }
+        yaml_skip_ws_inline(p);
+        ch = yaml_peek(p);
+    }
+
+    // Quoted string
+    if (ch == '"' || ch == '\'') {
+        cs_value result = yaml_parse_quoted_string(p, (char)ch, ok);
+        if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
+            p->anchors[p->anchor_count].name = anchor_name;
+            p->anchors[p->anchor_count].value = cs_value_copy(result);
+            p->anchor_count++;
+        } else {
+            free(anchor_name);
+        }
+        return result;
+    }
+
+    // Multiline literal
+    if (ch == '|' || ch == '>') {
+        cs_value result = yaml_parse_multiline(p, (char)ch, indent, ok);
+        if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
+            p->anchors[p->anchor_count].name = anchor_name;
+            p->anchors[p->anchor_count].value = cs_value_copy(result);
+            p->anchor_count++;
+        } else {
+            free(anchor_name);
+        }
+        return result;
+    }
+
+    // List marker
+    if (ch == '-') {
+        size_t save = p->pos;
+        yaml_advance(p);
+        int next = yaml_peek(p);
+        p->pos = save;
+        if (next == ' ' || next == '\n' || next == '\t') {
+            cs_value result = yaml_parse_list(p, indent, ok);
+            if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
+                p->anchors[p->anchor_count].name = anchor_name;
+                p->anchors[p->anchor_count].value = cs_value_copy(result);
+                p->anchor_count++;
+            } else {
+                free(anchor_name);
+            }
+            return result;
+        }
+    }
+
+    // Try to parse as map or plain scalar
+    size_t save_pos = p->pos;
+
+    // Look ahead for key: value pattern
+    int looks_like_map = 0;
+    while (p->pos < p->len) {
+        int c = yaml_peek(p);
+        if (c == ':') {
+            yaml_advance(p);
+            int next = yaml_peek(p);
+            if (next == ' ' || next == '\n' || next == '\t' || next == -1) {
+                looks_like_map = 1;
+            }
+            break;
+        }
+        if (c == '\n' || c == '[' || c == '{' || c == '-') {
+            break;
+        }
+        yaml_advance(p);
+    }
+    p->pos = save_pos;
+
+    if (looks_like_map) {
+        cs_value result = yaml_parse_map(p, indent, ok);
+        if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
+            p->anchors[p->anchor_count].name = anchor_name;
+            p->anchors[p->anchor_count].value = cs_value_copy(result);
+            p->anchor_count++;
+        } else {
+            free(anchor_name);
+        }
+        return result;
+    }
+
+    // Plain scalar
+    cs_value result = yaml_parse_plain_scalar(p, ok);
+    if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
+        p->anchors[p->anchor_count].name = anchor_name;
+        p->anchors[p->anchor_count].value = cs_value_copy(result);
+        p->anchor_count++;
+    } else {
+        free(anchor_name);
+    }
+    return result;
+}
+
+static int nf_yaml_parse(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1 || argv[0].type != CS_T_STR) {
+        cs_error(vm, "yaml_parse() requires a string argument");
+        return 1;
+    }
+
+    cs_string* str_obj = (cs_string*)argv[0].as.p;
+    const char* text = str_obj->data;
+    size_t text_len = str_obj->len;
+
+    yaml_parser p;
+    yaml_init(&p, text, text_len, vm);
+
+    // Skip document marker if present
+    if (text_len >= 3 && strncmp(text, "---", 3) == 0) {
+        p.pos = 3;
+        if (yaml_peek(&p) == '\n') {
+            yaml_advance(&p);
+        }
+    }
+
+    // Skip leading whitespace and comments
+    while (p.pos < p.len) {
+        int ch = yaml_peek(&p);
+        if (ch == ' ' || ch == '\t') {
+            yaml_advance(&p);
+        } else if (ch == '#') {
+            yaml_skip_comment(&p);
+            if (yaml_peek(&p) == '\n') {
+                yaml_advance(&p);
+            }
+        } else if (ch == '\n') {
+            yaml_advance(&p);
+        } else {
+            break;
+        }
+    }
+
+    if (p.pos >= p.len) {
+        yaml_cleanup(&p);
+        *out = cs_nil();
+        return 0;
+    }
+
+    int ok = 1;
+    cs_value result = yaml_parse_value(&p, 0, &ok);
+
+    yaml_cleanup(&p);
+
+    if (!ok) {
+        return 1;
+    }
+
+    *out = result;
+    return 0;
+}
+
+// Helper function to stringify a YAML value (forward declaration)
+static int yaml_stringify_value(cs_vm* vm, cs_value val, char** buf, size_t* len, size_t* cap, int depth, int indent);
+
+// Helper function to stringify a YAML value
+static int yaml_stringify_value(cs_vm* vm, cs_value val, char** buf, size_t* len, size_t* cap, int depth, int indent) {
+    switch (val.type) {
+        case CS_T_NIL:
+            if (!sb_append(buf, len, cap, "null", 4)) {
+                cs_error(vm, "out of memory");
+                return 0;
+            }
+            break;
+
+        case CS_T_BOOL: {
+            const char* str = val.as.b ? "true" : "false";
+            if (!sb_append(buf, len, cap, str, strlen(str))) {
+                cs_error(vm, "out of memory");
+                return 0;
+            }
+            break;
+        }
+
+        case CS_T_INT: {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), "%lld", (long long)val.as.i);
+            if (!sb_append(buf, len, cap, tmp, strlen(tmp))) {
+                cs_error(vm, "out of memory");
+                return 0;
+            }
+            break;
+        }
+
+        case CS_T_FLOAT: {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), "%g", val.as.f);
+            if (!sb_append(buf, len, cap, tmp, strlen(tmp))) {
+                cs_error(vm, "out of memory");
+                return 0;
+            }
+            break;
+        }
+
+        case CS_T_STR: {
+            cs_string* s = (cs_string*)val.as.p;
+            const char* str = s->data;
+
+            // Check if string needs quoting (contains special chars)
+            int needs_quote = 0;
+            int has_newline = 0;
+            for (size_t i = 0; i < s->len; i++) {
+                char ch = str[i];
+                if (ch == '\n') {
+                    has_newline = 1;
+                    needs_quote = 1;
+                    break;
+                }
+                if (ch == ':' || ch == '#' || ch == '[' || ch == ']' ||
+                    ch == '{' || ch == '}' || ch == ',' || ch == '&' ||
+                    ch == '*' || ch == '!' || ch == '|' || ch == '>' ||
+                    ch == '\'' || ch == '"' || ch == '%' || ch == '@' || ch == '`') {
+                    needs_quote = 1;
+                }
+            }
+
+            // Check if string looks like a number or boolean
+            if (!needs_quote && s->len > 0) {
+                if (strcmp(str, "true") == 0 || strcmp(str, "false") == 0 ||
+                    strcmp(str, "null") == 0 || strcmp(str, "yes") == 0 ||
+                    strcmp(str, "no") == 0 || strcmp(str, "on") == 0 ||
+                    strcmp(str, "off") == 0) {
+                    needs_quote = 1;
+                }
+            }
+
+            // Use multiline literal style for strings with newlines
+            if (has_newline) {
+                if (!sb_append(buf, len, cap, "|\n", 2)) {
+                    cs_error(vm, "out of memory");
+                    return 0;
+                }
+                // Add indented content
+                for (size_t i = 0; i < s->len; i++) {
+                    if (i == 0 || str[i-1] == '\n') {
+                        for (int j = 0; j < (depth + 1) * indent; j++) {
+                            if (!sb_append(buf, len, cap, " ", 1)) {
+                                cs_error(vm, "out of memory");
+                                return 0;
+                            }
+                        }
+                    }
+                    if (!sb_append(buf, len, cap, &str[i], 1)) {
+                        cs_error(vm, "out of memory");
+                        return 0;
+                    }
+                }
+            } else if (needs_quote) {
+                // Use double quotes
+                if (!sb_append(buf, len, cap, "\"", 1)) {
+                    cs_error(vm, "out of memory");
+                    return 0;
+                }
+                for (size_t i = 0; i < s->len; i++) {
+                    char ch = str[i];
+                    if (ch == '"' || ch == '\\') {
+                        if (!sb_append(buf, len, cap, "\\", 1)) {
+                            cs_error(vm, "out of memory");
+                            return 0;
+                        }
+                    }
+                    if (!sb_append(buf, len, cap, &ch, 1)) {
+                        cs_error(vm, "out of memory");
+                        return 0;
+                    }
+                }
+                if (!sb_append(buf, len, cap, "\"", 1)) {
+                    cs_error(vm, "out of memory");
+                    return 0;
+                }
+            } else {
+                // Plain string
+                if (!sb_append(buf, len, cap, str, s->len)) {
+                    cs_error(vm, "out of memory");
+                    return 0;
+                }
+            }
+            break;
+        }
+
+        case CS_T_LIST: {
+            size_t list_len = cs_list_len(val);
+            if (list_len == 0) {
+                if (!sb_append(buf, len, cap, "[]", 2)) {
+                    cs_error(vm, "out of memory");
+                    return 0;
+                }
+            } else {
+                // Block style list
+                for (size_t i = 0; i < list_len; i++) {
+                    if (i > 0 || depth > 0) {
+                        if (!sb_append(buf, len, cap, "\n", 1)) {
+                            cs_error(vm, "out of memory");
+                            return 0;
+                        }
+                        for (int j = 0; j < depth * indent; j++) {
+                            if (!sb_append(buf, len, cap, " ", 1)) {
+                                cs_error(vm, "out of memory");
+                                return 0;
+                            }
+                        }
+                    }
+                    if (!sb_append(buf, len, cap, "- ", 2)) {
+                        cs_error(vm, "out of memory");
+                        return 0;
+                    }
+
+                    cs_value item = cs_list_get(val, i);
+                    if (item.type == CS_T_MAP || item.type == CS_T_LIST) {
+                        if (!yaml_stringify_value(vm, item, buf, len, cap, depth + 1, indent)) {
+                            cs_value_release(item);
+                            return 0;
+                        }
+                    } else {
+                        if (!yaml_stringify_value(vm, item, buf, len, cap, depth, indent)) {
+                            cs_value_release(item);
+                            return 0;
+                        }
+                    }
+                    cs_value_release(item);
+                }
+            }
+            break;
+        }
+
+        case CS_T_MAP: {
+            cs_value keys = cs_map_keys(vm, val);
+            if (keys.type != CS_T_LIST) {
+                cs_error(vm, "out of memory");
+                return 0;
+            }
+
+            size_t num_keys = cs_list_len(keys);
+            if (num_keys == 0) {
+                if (!sb_append(buf, len, cap, "{}", 2)) {
+                    cs_value_release(keys);
+                    cs_error(vm, "out of memory");
+                    return 0;
+                }
+            } else {
+                // Block style map
+                for (size_t i = 0; i < num_keys; i++) {
+                    if (i > 0 || depth > 0) {
+                        if (!sb_append(buf, len, cap, "\n", 1)) {
+                            cs_value_release(keys);
+                            cs_error(vm, "out of memory");
+                            return 0;
+                        }
+                        for (int j = 0; j < depth * indent; j++) {
+                            if (!sb_append(buf, len, cap, " ", 1)) {
+                                cs_value_release(keys);
+                                cs_error(vm, "out of memory");
+                                return 0;
+                            }
+                        }
+                    }
+
+                    cs_value key = cs_list_get(keys, i);
+                    if (key.type == CS_T_STR) {
+                        cs_string* key_str = (cs_string*)key.as.p;
+                        if (!sb_append(buf, len, cap, key_str->data, key_str->len)) {
+                            cs_value_release(key);
+                            cs_value_release(keys);
+                            cs_error(vm, "out of memory");
+                            return 0;
+                        }
+
+                        cs_value map_val = cs_map_get(val, key_str->data);
+
+                        // Add colon with or without space depending on value type
+                        if (map_val.type == CS_T_MAP || map_val.type == CS_T_LIST) {
+                            if (!sb_append(buf, len, cap, ":", 1)) {
+                                cs_value_release(map_val);
+                                cs_value_release(key);
+                                cs_value_release(keys);
+                                cs_error(vm, "out of memory");
+                                return 0;
+                            }
+                            if (!yaml_stringify_value(vm, map_val, buf, len, cap, depth + 1, indent)) {
+                                cs_value_release(map_val);
+                                cs_value_release(key);
+                                cs_value_release(keys);
+                                return 0;
+                            }
+                        } else {
+                            if (!sb_append(buf, len, cap, ": ", 2)) {
+                                cs_value_release(map_val);
+                                cs_value_release(key);
+                                cs_value_release(keys);
+                                cs_error(vm, "out of memory");
+                                return 0;
+                            }
+                            if (!yaml_stringify_value(vm, map_val, buf, len, cap, depth, indent)) {
+                                cs_value_release(map_val);
+                                cs_value_release(key);
+                                cs_value_release(keys);
+                                return 0;
+                            }
+                        }
+                        cs_value_release(map_val);
+                    }
+                    cs_value_release(key);
+                }
+            }
+            cs_value_release(keys);
+            break;
+        }
+
+        default:
+            // For other types, use a simple representation
+            if (!sb_append(buf, len, cap, "null", 4)) {
+                cs_error(vm, "out of memory");
+                return 0;
+            }
+            break;
+    }
+
+    return 1;
+}
+
+static int nf_yaml_stringify(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1) {
+        cs_error(vm, "yaml_stringify() requires a value argument");
+        return 1;
+    }
+
+    int indent = 2;
+    if (argc >= 2 && argv[1].type == CS_T_INT) {
+        indent = (int)argv[1].as.i;
+        if (indent < 0) indent = 0;
+        if (indent > 8) indent = 8;
+    }
+
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+
+    if (!yaml_stringify_value(vm, argv[0], &buf, &len, &cap, 0, indent)) {
+        free(buf);
+        return 1;
+    }
+
+    if (!buf) buf = cs_strdup2_local("");
+    if (!buf) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    *out = cs_str_take(vm, buf, (uint64_t)len);
+    return 0;
+}
+
+// ============================================================================
+// XML Parser (XML 1.0 specification)
+// ============================================================================
+
+typedef struct {
+    const char* s;
+    size_t len;
+    size_t pos;
+    cs_vm* vm;
+} xml_parser;
+
+static void xml_init(xml_parser* p, const char* s, size_t len, cs_vm* vm) {
+    p->s = s;
+    p->len = len;
+    p->pos = 0;
+    p->vm = vm;
+}
+
+static int xml_peek(xml_parser* p) {
+    if (p->pos >= p->len) return -1;
+    return (unsigned char)p->s[p->pos];
+}
+
+static int xml_advance(xml_parser* p) {
+    if (p->pos >= p->len) return -1;
+    return (unsigned char)p->s[p->pos++];
+}
+
+static void xml_skip_ws(xml_parser* p) {
+    while (p->pos < p->len) {
+        int ch = xml_peek(p);
+        if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+            xml_advance(p);
+        } else {
+            break;
+        }
+    }
+}
+
+static int xml_match(xml_parser* p, const char* lit) {
+    size_t lit_len = strlen(lit);
+    if (p->pos + lit_len > p->len) return 0;
+    if (strncmp(p->s + p->pos, lit, lit_len) == 0) {
+        p->pos += lit_len;
+        return 1;
+    }
+    return 0;
+}
+
+static int xml_is_name_start(int ch) {
+    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_' || ch == ':';
+}
+
+static int xml_is_name_char(int ch) {
+    return xml_is_name_start(ch) || (ch >= '0' && ch <= '9') || ch == '-' || ch == '.';
+}
+
+static cs_value xml_parse_name(xml_parser* p, int* ok) {
+    *ok = 1;
+    size_t start = p->pos;
+
+    int first = xml_peek(p);
+    if (!xml_is_name_start(first)) {
+        cs_error(p->vm, "invalid XML name");
+        *ok = 0;
+        return cs_nil();
+    }
+    xml_advance(p);
+
+    while (p->pos < p->len && xml_is_name_char(xml_peek(p))) {
+        xml_advance(p);
+    }
+
+    size_t name_len = p->pos - start;
+    char* name = (char*)malloc(name_len + 1);
+    if (!name) {
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+    memcpy(name, p->s + start, name_len);
+    name[name_len] = '\0';
+
+    return cs_str_take(p->vm, name, (uint64_t)name_len);
+}
+
+static cs_value xml_decode_entity(xml_parser* p, int* ok) {
+    *ok = 1;
+
+    if (xml_match(p, "&lt;")) return cs_str(p->vm, "<");
+    if (xml_match(p, "&gt;")) return cs_str(p->vm, ">");
+    if (xml_match(p, "&amp;")) return cs_str(p->vm, "&");
+    if (xml_match(p, "&quot;")) return cs_str(p->vm, "\"");
+    if (xml_match(p, "&apos;")) return cs_str(p->vm, "'");
+
+    // Numeric entity: &#65; or &#x41;
+    if (xml_match(p, "&#")) {
+        int is_hex = 0;
+        if (xml_peek(p) == 'x' || xml_peek(p) == 'X') {
+            is_hex = 1;
+            xml_advance(p);
+        }
+
+        int value = 0;
+        int has_digits = 0;
+        while (p->pos < p->len) {
+            int ch = xml_peek(p);
+            if (ch == ';') {
+                xml_advance(p);
+                if (has_digits && value >= 0 && value <= 0x10FFFF) {
+                    char utf8[5] = {0};
+                    if (value < 0x80) {
+                        utf8[0] = (char)value;
+                    } else {
+                        utf8[0] = (char)value; // Simplified - just use the value
+                    }
+                    return cs_str(p->vm, utf8);
+                }
+                cs_error(p->vm, "invalid numeric entity");
+                *ok = 0;
+                return cs_nil();
+            }
+
+            int digit = -1;
+            if (ch >= '0' && ch <= '9') digit = ch - '0';
+            else if (is_hex && ch >= 'a' && ch <= 'f') digit = 10 + (ch - 'a');
+            else if (is_hex && ch >= 'A' && ch <= 'F') digit = 10 + (ch - 'A');
+            else break;
+
+            value = value * (is_hex ? 16 : 10) + digit;
+            has_digits = 1;
+            xml_advance(p);
+        }
+    }
+
+    cs_error(p->vm, "unknown entity");
+    *ok = 0;
+    return cs_nil();
+}
+
+static cs_value xml_parse_text(xml_parser* p, int* ok) {
+    *ok = 1;
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+
+    while (p->pos < p->len) {
+        int ch = xml_peek(p);
+
+        if (ch == '<') {
+            break;
+        }
+
+        if (ch == '&') {
+            cs_value entity = xml_decode_entity(p, ok);
+            if (!*ok) {
+                free(buf);
+                return cs_nil();
+            }
+
+            if (entity.type == CS_T_STR) {
+                cs_string* s = (cs_string*)entity.as.p;
+                if (!sb_append(&buf, &len, &cap, s->data, s->len)) {
+                    cs_value_release(entity);
+                    free(buf);
+                    cs_error(p->vm, "out of memory");
+                    *ok = 0;
+                    return cs_nil();
+                }
+            }
+            cs_value_release(entity);
+            continue;
+        }
+
+        xml_advance(p);
+        char c = (char)ch;
+        if (!sb_append(&buf, &len, &cap, &c, 1)) {
+            free(buf);
+            cs_error(p->vm, "out of memory");
+            *ok = 0;
+            return cs_nil();
+        }
+    }
+
+    if (!buf) buf = cs_strdup2_local("");
+    if (!buf) {
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+    return cs_str_take(p->vm, buf, (uint64_t)len);
+}
+
+static cs_value xml_parse_cdata(xml_parser* p, int* ok) {
+    *ok = 1;
+
+    if (!xml_match(p, "<![CDATA[")) {
+        cs_error(p->vm, "expected CDATA");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+
+    while (p->pos < p->len) {
+        if (xml_match(p, "]]>")) {
+            if (!buf) buf = cs_strdup2_local("");
+            if (!buf) {
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
+            return cs_str_take(p->vm, buf, (uint64_t)len);
+        }
+
+        char ch = (char)xml_advance(p);
+        if (!sb_append(&buf, &len, &cap, &ch, 1)) {
+            free(buf);
+            cs_error(p->vm, "out of memory");
+            *ok = 0;
+            return cs_nil();
+        }
+    }
+
+    free(buf);
+    cs_error(p->vm, "unterminated CDATA");
+    *ok = 0;
+    return cs_nil();
+}
+
+static cs_value xml_parse_comment(xml_parser* p, int* ok) {
+    *ok = 1;
+
+    if (!xml_match(p, "<!--")) {
+        cs_error(p->vm, "expected comment");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+
+    while (p->pos < p->len) {
+        if (xml_match(p, "-->")) {
+            if (!buf) buf = cs_strdup2_local("");
+            if (!buf) {
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
+            return cs_str_take(p->vm, buf, (uint64_t)len);
+        }
+
+        char ch = (char)xml_advance(p);
+        if (!sb_append(&buf, &len, &cap, &ch, 1)) {
+            free(buf);
+            cs_error(p->vm, "out of memory");
+            *ok = 0;
+            return cs_nil();
+        }
+    }
+
+    free(buf);
+    cs_error(p->vm, "unterminated comment");
+    *ok = 0;
+    return cs_nil();
+}
+
+static cs_value xml_parse_pi(xml_parser* p, int* ok);
+static cs_value xml_parse_element(xml_parser* p, int* ok);
+
+static cs_value xml_parse_pi(xml_parser* p, int* ok) {
+    *ok = 1;
+
+    if (!xml_match(p, "<?")) {
+        cs_error(p->vm, "expected processing instruction");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    // Skip to ?>
+    while (p->pos < p->len) {
+        if (xml_match(p, "?>")) {
+            return cs_nil(); // We don't store PIs in our simple representation
+        }
+        xml_advance(p);
+    }
+
+    cs_error(p->vm, "unterminated processing instruction");
+    *ok = 0;
+    return cs_nil();
+}
+
+static cs_value xml_parse_attributes(xml_parser* p, int* ok) {
+    *ok = 1;
+
+    cs_value attrs = cs_map(p->vm);
+    if (attrs.type != CS_T_MAP) {
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    while (p->pos < p->len) {
+        xml_skip_ws(p);
+
+        int ch = xml_peek(p);
+        if (ch == '>' || ch == '/' || ch == '?') {
+            break;
+        }
+
+        // Parse attribute name
+        cs_value name = xml_parse_name(p, ok);
+        if (!*ok) {
+            cs_value_release(attrs);
+            return cs_nil();
+        }
+
+        xml_skip_ws(p);
+
+        if (xml_peek(p) != '=') {
+            cs_value_release(name);
+            cs_value_release(attrs);
+            cs_error(p->vm, "expected '=' in attribute");
+            *ok = 0;
+            return cs_nil();
+        }
+        xml_advance(p);
+
+        xml_skip_ws(p);
+
+        // Parse attribute value
+        int quote = xml_peek(p);
+        if (quote != '"' && quote != '\'') {
+            cs_value_release(name);
+            cs_value_release(attrs);
+            cs_error(p->vm, "expected quote in attribute value");
+            *ok = 0;
+            return cs_nil();
+        }
+        xml_advance(p);
+
+        char* buf = NULL;
+        size_t len = 0, cap = 0;
+
+        while (p->pos < p->len) {
+            int ch2 = xml_peek(p);
+
+            if (ch2 == quote) {
+                xml_advance(p);
+                break;
+            }
+
+            if (ch2 == '&') {
+                cs_value entity = xml_decode_entity(p, ok);
+                if (!*ok) {
+                    free(buf);
+                    cs_value_release(name);
+                    cs_value_release(attrs);
+                    return cs_nil();
+                }
+
+                if (entity.type == CS_T_STR) {
+                    cs_string* s = (cs_string*)entity.as.p;
+                    if (!sb_append(&buf, &len, &cap, s->data, s->len)) {
+                        cs_value_release(entity);
+                        free(buf);
+                        cs_value_release(name);
+                        cs_value_release(attrs);
+                        cs_error(p->vm, "out of memory");
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                }
+                cs_value_release(entity);
+                continue;
+            }
+
+            xml_advance(p);
+            char c = (char)ch2;
+            if (!sb_append(&buf, &len, &cap, &c, 1)) {
+                free(buf);
+                cs_value_release(name);
+                cs_value_release(attrs);
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
+        }
+
+        if (!buf) buf = cs_strdup2_local("");
+        if (!buf) {
+            cs_value_release(name);
+            cs_value_release(attrs);
+            cs_error(p->vm, "out of memory");
+            *ok = 0;
+            return cs_nil();
+        }
+        cs_value value = cs_str_take(p->vm, buf, (uint64_t)len);
+
+        // Set attribute
+        if (name.type == CS_T_STR) {
+            cs_string* name_str = (cs_string*)name.as.p;
+            cs_map_set(attrs, name_str->data, value);
+        }
+
+        cs_value_release(name);
+        cs_value_release(value);
+    }
+
+    return attrs;
+}
+
+static cs_value xml_parse_element(xml_parser* p, int* ok) {
+    *ok = 1;
+
+    if (xml_peek(p) != '<') {
+        cs_error(p->vm, "expected '<'");
+        *ok = 0;
+        return cs_nil();
+    }
+    xml_advance(p);
+
+    // Parse tag name
+    cs_value tag_name = xml_parse_name(p, ok);
+    if (!*ok) {
+        return cs_nil();
+    }
+
+    // Parse attributes
+    cs_value attrs = xml_parse_attributes(p, ok);
+    if (!*ok) {
+        cs_value_release(tag_name);
+        return cs_nil();
+    }
+
+    xml_skip_ws(p);
+
+    // Check for self-closing tag
+    if (xml_match(p, "/>")) {
+        cs_value elem = cs_map(p->vm);
+        if (elem.type != CS_T_MAP) {
+            cs_value_release(tag_name);
+            cs_value_release(attrs);
+            cs_error(p->vm, "out of memory");
+            *ok = 0;
+            return cs_nil();
+        }
+
+        cs_map_set(elem, "name", tag_name);
+
+        // Only add attrs if not empty
+        cs_value keys = cs_map_keys(p->vm, attrs);
+        if (keys.type == CS_T_LIST && cs_list_len(keys) > 0) {
+            cs_map_set(elem, "attrs", attrs);
+        }
+        cs_value_release(keys);
+
+        cs_value_release(tag_name);
+        cs_value_release(attrs);
+        return elem;
+    }
+
+    if (xml_peek(p) != '>') {
+        cs_value_release(tag_name);
+        cs_value_release(attrs);
+        cs_error(p->vm, "expected '>'");
+        *ok = 0;
+        return cs_nil();
+    }
+    xml_advance(p);
+
+    // Parse children
+    cs_value children = cs_list(p->vm);
+    if (children.type != CS_T_LIST) {
+        cs_value_release(tag_name);
+        cs_value_release(attrs);
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    cs_value text_content = cs_nil();
+
+    while (p->pos < p->len) {
+        xml_skip_ws(p);
+
+        if (p->pos >= p->len) break;
+
+        // Check for closing tag
+        if (p->pos + 1 < p->len && p->s[p->pos] == '<' && p->s[p->pos + 1] == '/') {
+            break;
+        }
+
+        // Check for various child node types
+        if (xml_peek(p) == '<') {
+            if (p->pos + 3 < p->len && strncmp(p->s + p->pos, "<!--", 4) == 0) {
+                // Comment - skip it
+                cs_value comment = xml_parse_comment(p, ok);
+                if (!*ok) {
+                    cs_value_release(children);
+                    cs_value_release(tag_name);
+                    cs_value_release(attrs);
+                    return cs_nil();
+                }
+                cs_value_release(comment);
+                continue;
+            }
+
+            if (p->pos + 8 < p->len && strncmp(p->s + p->pos, "<![CDATA[", 9) == 0) {
+                // CDATA
+                cs_value cdata_text = xml_parse_cdata(p, ok);
+                if (!*ok) {
+                    cs_value_release(children);
+                    cs_value_release(tag_name);
+                    cs_value_release(attrs);
+                    return cs_nil();
+                }
+
+                if (text_content.type == CS_T_NIL) {
+                    text_content = cdata_text;
+                } else {
+                    cs_value_release(cdata_text);
+                }
+                continue;
+            }
+
+            if (p->pos + 1 < p->len && p->s[p->pos + 1] == '?') {
+                // Processing instruction - skip it
+                cs_value pi = xml_parse_pi(p, ok);
+                if (!*ok) {
+                    cs_value_release(children);
+                    cs_value_release(tag_name);
+                    cs_value_release(attrs);
+                    cs_value_release(text_content);
+                    return cs_nil();
+                }
+                cs_value_release(pi);
+                continue;
+            }
+
+            // Child element
+            cs_value child = xml_parse_element(p, ok);
+            if (!*ok) {
+                cs_value_release(children);
+                cs_value_release(tag_name);
+                cs_value_release(attrs);
+                cs_value_release(text_content);
+                return cs_nil();
+            }
+            cs_list_push(children, child);
+            cs_value_release(child);
+        } else {
+            // Text content
+            cs_value text = xml_parse_text(p, ok);
+            if (!*ok) {
+                cs_value_release(children);
+                cs_value_release(tag_name);
+                cs_value_release(attrs);
+                cs_value_release(text_content);
+                return cs_nil();
+            }
+
+            // Trim and check if meaningful
+            if (text.type == CS_T_STR) {
+                cs_string* text_str = (cs_string*)text.as.p;
+                int has_content = 0;
+                for (size_t i = 0; i < text_str->len; i++) {
+                    if (text_str->data[i] != ' ' && text_str->data[i] != '\t' &&
+                        text_str->data[i] != '\r' && text_str->data[i] != '\n') {
+                        has_content = 1;
+                        break;
+                    }
+                }
+
+                if (has_content) {
+                    if (text_content.type == CS_T_NIL) {
+                        text_content = cs_value_copy(text);
+                    }
+                }
+            }
+
+            cs_value_release(text);
+        }
+    }
+
+    // Parse closing tag
+    if (!xml_match(p, "</")) {
+        cs_value_release(children);
+        cs_value_release(tag_name);
+        cs_value_release(attrs);
+        cs_value_release(text_content);
+        cs_error(p->vm, "expected closing tag");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    cs_value close_name = xml_parse_name(p, ok);
+    if (!*ok) {
+        cs_value_release(children);
+        cs_value_release(tag_name);
+        cs_value_release(attrs);
+        cs_value_release(text_content);
+        return cs_nil();
+    }
+
+    // Verify tag names match
+    if (tag_name.type == CS_T_STR && close_name.type == CS_T_STR) {
+        cs_string* open_str = (cs_string*)tag_name.as.p;
+        cs_string* close_str = (cs_string*)close_name.as.p;
+        if (open_str->len != close_str->len ||
+            strncmp(open_str->data, close_str->data, open_str->len) != 0) {
+            cs_value_release(close_name);
+            cs_value_release(children);
+            cs_value_release(tag_name);
+            cs_value_release(attrs);
+            cs_value_release(text_content);
+            cs_error(p->vm, "mismatched tags");
+            *ok = 0;
+            return cs_nil();
+        }
+    }
+    cs_value_release(close_name);
+
+    xml_skip_ws(p);
+    if (xml_peek(p) != '>') {
+        cs_value_release(children);
+        cs_value_release(tag_name);
+        cs_value_release(attrs);
+        cs_value_release(text_content);
+        cs_error(p->vm, "expected '>' in closing tag");
+        *ok = 0;
+        return cs_nil();
+    }
+    xml_advance(p);
+
+    // Build element map
+    cs_value elem = cs_map(p->vm);
+    if (elem.type != CS_T_MAP) {
+        cs_value_release(children);
+        cs_value_release(tag_name);
+        cs_value_release(attrs);
+        cs_value_release(text_content);
+        cs_error(p->vm, "out of memory");
+        *ok = 0;
+        return cs_nil();
+    }
+
+    cs_map_set(elem, "name", tag_name);
+
+    // Add attrs if not empty
+    cs_value keys = cs_map_keys(p->vm, attrs);
+    if (keys.type == CS_T_LIST && cs_list_len(keys) > 0) {
+        cs_map_set(elem, "attrs", attrs);
+    }
+    cs_value_release(keys);
+
+    // Add text or children
+    if (text_content.type != CS_T_NIL && cs_list_len(children) == 0) {
+        cs_map_set(elem, "text", text_content);
+    } else if (cs_list_len(children) > 0) {
+        cs_map_set(elem, "children", children);
+    }
+
+    cs_value_release(tag_name);
+    cs_value_release(attrs);
+    cs_value_release(children);
+    cs_value_release(text_content);
+
+    return elem;
+}
+
+static int nf_xml_parse(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1 || argv[0].type != CS_T_STR) {
+        cs_error(vm, "xml_parse() requires a string argument");
+        return 1;
+    }
+
+    cs_string* str_obj = (cs_string*)argv[0].as.p;
+    const char* text = str_obj->data;
+    size_t text_len = str_obj->len;
+
+    xml_parser p;
+    xml_init(&p, text, text_len, vm);
+
+    // Skip XML declaration and DOCTYPE
+    xml_skip_ws(&p);
+    while (p.pos < p.len) {
+        if (xml_match(&p, "<?")) {
+            // Skip processing instruction
+            while (p.pos < p.len && !xml_match(&p, "?>")) {
+                xml_advance(&p);
+            }
+            xml_skip_ws(&p);
+        } else if (xml_match(&p, "<!DOCTYPE")) {
+            // Skip DOCTYPE
+            int depth = 1;
+            while (p.pos < p.len && depth > 0) {
+                int ch = xml_advance(&p);
+                if (ch == '<') depth++;
+                if (ch == '>') depth--;
+            }
+            xml_skip_ws(&p);
+        } else if (p.pos + 3 < p.len && strncmp(p.s + p.pos, "<!--", 4) == 0) {
+            // Skip comment
+            int ok = 1;
+            cs_value comment = xml_parse_comment(&p, &ok);
+            cs_value_release(comment);
+            if (!ok) return 1;
+            xml_skip_ws(&p);
+        } else {
+            break;
+        }
+    }
+
+    if (p.pos >= p.len) {
+        cs_error(vm, "no root element found");
+        return 1;
+    }
+
+    int ok = 1;
+    cs_value result = xml_parse_element(&p, &ok);
+
+    if (!ok) {
+        return 1;
+    }
+
+    *out = result;
+    return 0;
+}
+
+// Forward declaration for recursive stringify
+static int xml_stringify_element(cs_vm* vm, cs_value elem, char** buf, size_t* len, size_t* cap, int depth, int indent);
+
+static int xml_stringify_element(cs_vm* vm, cs_value elem, char** buf, size_t* len, size_t* cap, int depth, int indent) {
+    if (elem.type != CS_T_MAP) {
+        cs_error(vm, "xml_stringify expects map");
+        return 0;
+    }
+
+    // Get element name
+    cs_value name_val = cs_map_get(elem, "name");
+    if (name_val.type != CS_T_STR) {
+        cs_value_release(name_val);
+        cs_error(vm, "element missing name");
+        return 0;
+    }
+    cs_string* name = (cs_string*)name_val.as.p;
+
+    // Add indentation
+    for (int i = 0; i < depth * indent; i++) {
+        if (!sb_append(buf, len, cap, " ", 1)) {
+            cs_value_release(name_val);
+            cs_error(vm, "out of memory");
+            return 0;
+        }
+    }
+
+    // Opening tag
+    if (!sb_append(buf, len, cap, "<", 1) ||
+        !sb_append(buf, len, cap, name->data, name->len)) {
+        cs_value_release(name_val);
+        cs_error(vm, "out of memory");
+        return 0;
+    }
+
+    // Attributes
+    cs_value attrs = cs_map_get(elem, "attrs");
+    if (attrs.type == CS_T_MAP) {
+        cs_value keys = cs_map_keys(vm, attrs);
+        if (keys.type == CS_T_LIST) {
+            size_t num_keys = cs_list_len(keys);
+            for (size_t i = 0; i < num_keys; i++) {
+                cs_value key = cs_list_get(keys, i);
+                if (key.type == CS_T_STR) {
+                    cs_string* key_str = (cs_string*)key.as.p;
+                    cs_value val = cs_map_get(attrs, key_str->data);
+
+                    if (!sb_append(buf, len, cap, " ", 1) ||
+                        !sb_append(buf, len, cap, key_str->data, key_str->len) ||
+                        !sb_append(buf, len, cap, "=\"", 2)) {
+                        cs_value_release(val);
+                        cs_value_release(key);
+                        cs_value_release(keys);
+                        cs_value_release(attrs);
+                        cs_value_release(name_val);
+                        cs_error(vm, "out of memory");
+                        return 0;
+                    }
+
+                    // Escape attribute value
+                    if (val.type == CS_T_STR) {
+                        cs_string* val_str = (cs_string*)val.as.p;
+                        for (size_t j = 0; j < val_str->len; j++) {
+                            char ch = val_str->data[j];
+                            const char* esc = NULL;
+                            if (ch == '<') esc = "&lt;";
+                            else if (ch == '>') esc = "&gt;";
+                            else if (ch == '&') esc = "&amp;";
+                            else if (ch == '"') esc = "&quot;";
+                            else if (ch == '\'') esc = "&apos;";
+
+                            if (esc) {
+                                if (!sb_append(buf, len, cap, esc, strlen(esc))) {
+                                    cs_value_release(val);
+                                    cs_value_release(key);
+                                    cs_value_release(keys);
+                                    cs_value_release(attrs);
+                                    cs_value_release(name_val);
+                                    cs_error(vm, "out of memory");
+                                    return 0;
+                                }
+                            } else {
+                                if (!sb_append(buf, len, cap, &ch, 1)) {
+                                    cs_value_release(val);
+                                    cs_value_release(key);
+                                    cs_value_release(keys);
+                                    cs_value_release(attrs);
+                                    cs_value_release(name_val);
+                                    cs_error(vm, "out of memory");
+                                    return 0;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!sb_append(buf, len, cap, "\"", 1)) {
+                        cs_value_release(val);
+                        cs_value_release(key);
+                        cs_value_release(keys);
+                        cs_value_release(attrs);
+                        cs_value_release(name_val);
+                        cs_error(vm, "out of memory");
+                        return 0;
+                    }
+
+                    cs_value_release(val);
+                }
+                cs_value_release(key);
+            }
+        }
+        cs_value_release(keys);
+    }
+    cs_value_release(attrs);
+
+    // Check for text content
+    cs_value text = cs_map_get(elem, "text");
+    cs_value children = cs_map_get(elem, "children");
+
+    // Self-closing tag if no content
+    if (text.type == CS_T_NIL && (children.type != CS_T_LIST || cs_list_len(children) == 0)) {
+        if (!sb_append(buf, len, cap, "/>", 2)) {
+            cs_value_release(text);
+            cs_value_release(children);
+            cs_value_release(name_val);
+            cs_error(vm, "out of memory");
+            return 0;
+        }
+        cs_value_release(text);
+        cs_value_release(children);
+        cs_value_release(name_val);
+        return 1;
+    }
+
+    // Close opening tag
+    if (!sb_append(buf, len, cap, ">", 1)) {
+        cs_value_release(text);
+        cs_value_release(children);
+        cs_value_release(name_val);
+        cs_error(vm, "out of memory");
+        return 0;
+    }
+
+    // Text content
+    if (text.type == CS_T_STR) {
+        cs_string* text_str = (cs_string*)text.as.p;
+        for (size_t i = 0; i < text_str->len; i++) {
+            char ch = text_str->data[i];
+            const char* esc = NULL;
+            if (ch == '<') esc = "&lt;";
+            else if (ch == '>') esc = "&gt;";
+            else if (ch == '&') esc = "&amp;";
+
+            if (esc) {
+                if (!sb_append(buf, len, cap, esc, strlen(esc))) {
+                    cs_value_release(text);
+                    cs_value_release(children);
+                    cs_value_release(name_val);
+                    cs_error(vm, "out of memory");
+                    return 0;
+                }
+            } else {
+                if (!sb_append(buf, len, cap, &ch, 1)) {
+                    cs_value_release(text);
+                    cs_value_release(children);
+                    cs_value_release(name_val);
+                    cs_error(vm, "out of memory");
+                    return 0;
+                }
+            }
+        }
+    }
+
+    // Child elements
+    if (children.type == CS_T_LIST) {
+        size_t num_children = cs_list_len(children);
+        for (size_t i = 0; i < num_children; i++) {
+            if (indent > 0) {
+                if (!sb_append(buf, len, cap, "\n", 1)) {
+                    cs_value_release(text);
+                    cs_value_release(children);
+                    cs_value_release(name_val);
+                    cs_error(vm, "out of memory");
+                    return 0;
+                }
+            }
+
+            cs_value child = cs_list_get(children, i);
+            if (!xml_stringify_element(vm, child, buf, len, cap, depth + 1, indent)) {
+                cs_value_release(child);
+                cs_value_release(text);
+                cs_value_release(children);
+                cs_value_release(name_val);
+                return 0;
+            }
+            cs_value_release(child);
+        }
+
+        if (num_children > 0 && indent > 0) {
+            if (!sb_append(buf, len, cap, "\n", 1)) {
+                cs_value_release(text);
+                cs_value_release(children);
+                cs_value_release(name_val);
+                cs_error(vm, "out of memory");
+                return 0;
+            }
+            for (int i = 0; i < depth * indent; i++) {
+                if (!sb_append(buf, len, cap, " ", 1)) {
+                    cs_value_release(text);
+                    cs_value_release(children);
+                    cs_value_release(name_val);
+                    cs_error(vm, "out of memory");
+                    return 0;
+                }
+            }
+        }
+    }
+
+    cs_value_release(text);
+    cs_value_release(children);
+
+    // Closing tag
+    if (!sb_append(buf, len, cap, "</", 2) ||
+        !sb_append(buf, len, cap, name->data, name->len) ||
+        !sb_append(buf, len, cap, ">", 1)) {
+        cs_value_release(name_val);
+        cs_error(vm, "out of memory");
+        return 0;
+    }
+
+    cs_value_release(name_val);
+    return 1;
+}
+
+static int nf_xml_stringify(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1) {
+        cs_error(vm, "xml_stringify() requires a value argument");
+        return 1;
+    }
+
+    int indent = 2;
+    if (argc >= 2 && argv[1].type == CS_T_INT) {
+        indent = (int)argv[1].as.i;
+        if (indent < 0) indent = 0;
+        if (indent > 8) indent = 8;
+    }
+
+    char* buf = NULL;
+    size_t len = 0, cap = 0;
+
+    if (!xml_stringify_element(vm, argv[0], &buf, &len, &cap, 0, indent)) {
+        free(buf);
+        return 1;
+    }
+
+    if (!buf) buf = cs_strdup2_local("");
+    if (!buf) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    *out = cs_str_take(vm, buf, (uint64_t)len);
+    return 0;
+}
+
 static int nf_fmt(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
     (void)ud;
     if (!out) return 0;
@@ -4241,6 +7218,12 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "path_ext",    nf_path_ext,    NULL);
     cs_register_native(vm, "json_parse",    nf_json_parse,    NULL);
     cs_register_native(vm, "json_stringify", nf_json_stringify, NULL);
+    cs_register_native(vm, "csv_parse",     nf_csv_parse,     NULL);
+    cs_register_native(vm, "csv_stringify",  nf_csv_stringify,  NULL);
+    cs_register_native(vm, "yaml_parse",    nf_yaml_parse,    NULL);
+    cs_register_native(vm, "yaml_stringify", nf_yaml_stringify, NULL);
+    cs_register_native(vm, "xml_parse",     nf_xml_parse,     NULL);
+    cs_register_native(vm, "xml_stringify",  nf_xml_stringify,  NULL);
     cs_register_native(vm, "read_file",  nf_read_file,  NULL);
     cs_register_native(vm, "read_file_bytes",  nf_read_file_bytes,  NULL);
     cs_register_native(vm, "write_file", nf_write_file, NULL);
