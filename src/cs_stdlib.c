@@ -4263,29 +4263,12 @@ static cs_value yaml_parse_number(yaml_parser* p, const char* str, size_t len, i
     return cs_nil();
 }
 
-static cs_value yaml_parse_plain_scalar(yaml_parser* p, int* ok);
+static cs_value yaml_parse_plain_scalar(yaml_parser* p, int indent, int* ok);
 static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok);
 
 // Parse Unicode escape sequence (\uXXXX or \UXXXXXXXX)
-static int yaml_parse_unicode_escape(yaml_parser* p, int num_digits, char** buf, size_t* len, size_t* cap) {
-    uint32_t codepoint = 0;
-    for (int i = 0; i < num_digits; i++) {
-        int ch = yaml_peek(p);
-        if (ch == -1) return 0;
-        yaml_advance(p);
-        
-        if (ch >= '0' && ch <= '9') {
-            codepoint = codepoint * 16 + (ch - '0');
-        } else if (ch >= 'a' && ch <= 'f') {
-            codepoint = codepoint * 16 + (ch - 'a' + 10);
-        } else if (ch >= 'A' && ch <= 'F') {
-            codepoint = codepoint * 16 + (ch - 'A' + 10);
-        } else {
-            return 0; // Invalid hex digit
-        }
-    }
-    
-    // Encode UTF-8
+// Helper function to encode a Unicode codepoint to UTF-8
+static int yaml_encode_utf8(uint32_t codepoint, char** buf, size_t* len, size_t* cap) {
     if (codepoint <= 0x7F) {
         char c = (char)codepoint;
         return sb_append(buf, len, cap, &c, 1);
@@ -4297,21 +4280,198 @@ static int yaml_parse_unicode_escape(yaml_parser* p, int num_digits, char** buf,
         char c1 = (char)(0xE0 | (codepoint >> 12));
         char c2 = (char)(0x80 | ((codepoint >> 6) & 0x3F));
         char c3 = (char)(0x80 | (codepoint & 0x3F));
-        return sb_append(buf, len, cap, &c1, 1) && 
-               sb_append(buf, len, cap, &c2, 1) && 
+        return sb_append(buf, len, cap, &c1, 1) &&
+               sb_append(buf, len, cap, &c2, 1) &&
                sb_append(buf, len, cap, &c3, 1);
     } else if (codepoint <= 0x10FFFF) {
         char c1 = (char)(0xF0 | (codepoint >> 18));
         char c2 = (char)(0x80 | ((codepoint >> 12) & 0x3F));
         char c3 = (char)(0x80 | ((codepoint >> 6) & 0x3F));
         char c4 = (char)(0x80 | (codepoint & 0x3F));
-        return sb_append(buf, len, cap, &c1, 1) && 
-               sb_append(buf, len, cap, &c2, 1) && 
-               sb_append(buf, len, cap, &c3, 1) && 
+        return sb_append(buf, len, cap, &c1, 1) &&
+               sb_append(buf, len, cap, &c2, 1) &&
+               sb_append(buf, len, cap, &c3, 1) &&
                sb_append(buf, len, cap, &c4, 1);
     }
-    
+
     return 0;
+}
+
+static int yaml_parse_unicode_escape(yaml_parser* p, int num_digits, char** buf, size_t* len, size_t* cap) {
+    uint32_t codepoint = 0;
+    for (int i = 0; i < num_digits; i++) {
+        int ch = yaml_peek(p);
+        if (ch == -1) return 0;
+        yaml_advance(p);
+
+        if (ch >= '0' && ch <= '9') {
+            codepoint = codepoint * 16 + (ch - '0');
+        } else if (ch >= 'a' && ch <= 'f') {
+            codepoint = codepoint * 16 + (ch - 'a' + 10);
+        } else if (ch >= 'A' && ch <= 'F') {
+            codepoint = codepoint * 16 + (ch - 'A' + 10);
+        } else {
+            return 0; // Invalid hex digit
+        }
+    }
+
+    return yaml_encode_utf8(codepoint, buf, len, cap);
+}
+
+// Base64 decoding for !!binary tag
+static int base64_char_value(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    if (c == '=') return -1; // padding
+    return -2; // invalid
+}
+
+static uint8_t* base64_decode(const char* input, size_t input_len, size_t* output_len) {
+    // Remove whitespace and count valid chars
+    size_t valid_len = 0;
+    for (size_t i = 0; i < input_len; i++) {
+        char c = input[i];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+            valid_len++;
+        }
+    }
+    
+    // Empty string is valid (0 bytes)
+    if (valid_len == 0) {
+        *output_len = 0;
+        // Return empty bytes - allocate minimum buffer
+        uint8_t* empty = (uint8_t*)malloc(1);
+        if (!empty) return NULL;
+        return empty;
+    }
+    
+    if (valid_len % 4 != 0) {
+        return NULL;
+    }
+    
+    size_t max_output_len = (valid_len / 4) * 3;
+    uint8_t* output = (uint8_t*)malloc(max_output_len);
+    if (!output) return NULL;
+    
+    size_t out_pos = 0;
+    int values[4];
+    int val_count = 0;
+    
+    for (size_t i = 0; i < input_len; i++) {
+        char c = input[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            continue; // skip whitespace
+        }
+        
+        int val = base64_char_value(c);
+        if (val == -2) {
+            free(output);
+            return NULL; // invalid character
+        }
+        
+        values[val_count++] = val;
+        
+        if (val_count == 4) {
+            // Decode 4 base64 chars to 3 bytes
+            if (values[0] >= 0 && values[1] >= 0) {
+                output[out_pos++] = (values[0] << 2) | (values[1] >> 4);
+            }
+            if (values[1] >= 0 && values[2] >= 0) {
+                output[out_pos++] = (values[1] << 4) | (values[2] >> 2);
+            }
+            if (values[2] >= 0 && values[3] >= 0) {
+                output[out_pos++] = (values[2] << 6) | values[3];
+            }
+            val_count = 0;
+        }
+    }
+    
+    *output_len = out_pos;
+    return output;
+}
+
+// ISO 8601 timestamp validation for !!timestamp tag
+static int is_valid_iso8601_timestamp(const char* s) {
+    // Basic validation for common ISO 8601 formats:
+    // YYYY-MM-DD
+    // YYYY-MM-DDTHH:MM:SS
+    // YYYY-MM-DDTHH:MM:SS.sss
+    // YYYY-MM-DDTHH:MM:SSZ
+    // YYYY-MM-DDTHH:MM:SS+HH:MM
+    // YYYY-MM-DD HH:MM:SS
+    
+    if (!s || strlen(s) < 10) return 0;
+    
+    // Check year-month-day format (YYYY-MM-DD)
+    if (!(s[0] >= '0' && s[0] <= '9')) return 0;
+    if (!(s[1] >= '0' && s[1] <= '9')) return 0;
+    if (!(s[2] >= '0' && s[2] <= '9')) return 0;
+    if (!(s[3] >= '0' && s[3] <= '9')) return 0;
+    if (s[4] != '-') return 0;
+    if (!(s[5] >= '0' && s[5] <= '9')) return 0;
+    if (!(s[6] >= '0' && s[6] <= '9')) return 0;
+    if (s[7] != '-') return 0;
+    if (!(s[8] >= '0' && s[8] <= '9')) return 0;
+    if (!(s[9] >= '0' && s[9] <= '9')) return 0;
+    
+    // If just date, that's valid
+    if (s[10] == '\0') return 1;
+    
+    // Check for time separator (T or space)
+    if (s[10] != 'T' && s[10] != 't' && s[10] != ' ') return 0;
+    
+    // Check time format (HH:MM:SS)
+    if (strlen(s) < 19) return 0;
+    if (!(s[11] >= '0' && s[11] <= '9')) return 0;
+    if (!(s[12] >= '0' && s[12] <= '9')) return 0;
+    if (s[13] != ':') return 0;
+    if (!(s[14] >= '0' && s[14] <= '9')) return 0;
+    if (!(s[15] >= '0' && s[15] <= '9')) return 0;
+    if (s[16] != ':') return 0;
+    if (!(s[17] >= '0' && s[17] <= '9')) return 0;
+    if (!(s[18] >= '0' && s[18] <= '9')) return 0;
+    
+    // End of string is valid
+    if (s[19] == '\0') return 1;
+    
+    // Check for fractional seconds (.sss...)
+    if (s[19] == '.') {
+        size_t i = 20;
+        while (s[i] >= '0' && s[i] <= '9') i++;
+        if (s[i] == '\0' || s[i] == 'Z' || s[i] == 'z' || s[i] == '+' || s[i] == '-') {
+            // Valid fractional seconds
+            if (s[i] == '\0' || s[i] == 'Z' || s[i] == 'z') return 1;
+            // Continue to check timezone
+        } else {
+            return 0;
+        }
+    }
+    
+    // Check for timezone (Z or ±HH:MM)
+    size_t pos = 19;
+    while (s[pos] && s[pos] != 'Z' && s[pos] != 'z' && s[pos] != '+' && s[pos] != '-') {
+        pos++;
+    }
+    
+    if (s[pos] == 'Z' || s[pos] == 'z') {
+        return s[pos + 1] == '\0';
+    }
+    
+    if (s[pos] == '+' || s[pos] == '-') {
+        // Check ±HH:MM format
+        if (strlen(s + pos) < 6) return 0;
+        if (!(s[pos + 1] >= '0' && s[pos + 1] <= '9')) return 0;
+        if (!(s[pos + 2] >= '0' && s[pos + 2] <= '9')) return 0;
+        if (s[pos + 3] != ':') return 0;
+        if (!(s[pos + 4] >= '0' && s[pos + 4] <= '9')) return 0;
+        if (!(s[pos + 5] >= '0' && s[pos + 5] <= '9')) return 0;
+        return s[pos + 6] == '\0';
+    }
+    
+    return 1;
 }
 
 // Apply tag to value
@@ -4401,6 +4561,145 @@ static cs_value yaml_apply_tag(yaml_parser* p, const char* tag, cs_value val, in
         return val;
     }
     
+    // !!binary - Base64-encoded binary data
+    if (strcmp(tag, "!!binary") == 0 || strcmp(tag, "tag:yaml.org,2002:binary") == 0) {
+        if (val.type == CS_T_STR) {
+            cs_string* s = (cs_string*)val.as.p;
+            size_t decoded_len;
+            uint8_t* decoded = base64_decode(s->data, s->len, &decoded_len);
+            if (decoded) {
+                cs_value result = cs_bytes_take(p->vm, decoded, decoded_len);
+                cs_value_release(val);
+                return result;
+            }
+        }
+        cs_error(p->vm, "!!binary requires valid base64-encoded string");
+        *ok = 0;
+        cs_value_release(val);
+        return cs_nil();
+    }
+    
+    // !!timestamp - ISO 8601 timestamp
+    if (strcmp(tag, "!!timestamp") == 0 || strcmp(tag, "tag:yaml.org,2002:timestamp") == 0) {
+        if (val.type == CS_T_STR) {
+            cs_string* s = (cs_string*)val.as.p;
+            if (is_valid_iso8601_timestamp(s->data)) {
+                return val; // Return validated timestamp string
+            }
+        }
+        cs_error(p->vm, "!!timestamp requires valid ISO 8601 format (e.g., '2024-01-27T15:30:00Z')");
+        *ok = 0;
+        cs_value_release(val);
+        return cs_nil();
+    }
+    
+    // !!set - Unordered set (map with null values)
+    if (strcmp(tag, "!!set") == 0 || strcmp(tag, "tag:yaml.org,2002:set") == 0) {
+        if (val.type == CS_T_MAP) {
+            // Verify all values are null
+            cs_map_obj* m = (cs_map_obj*)val.as.p;
+            for (size_t i = 0; i < m->cap; i++) {
+                if (m->entries[i].in_use && m->entries[i].val.type != CS_T_NIL) {
+                    cs_error(p->vm, "!!set requires all map values to be null");
+                    *ok = 0;
+                    cs_value_release(val);
+                    return cs_nil();
+                }
+            }
+            return val; // Valid set (map with null values)
+        } else if (val.type == CS_T_LIST) {
+            // Convert list to map with null values
+            cs_value set = cs_map(p->vm);
+            cs_list_obj* list = (cs_list_obj*)val.as.p;
+            for (size_t i = 0; i < list->len; i++) {
+                if (list->items[i].type == CS_T_STR) {
+                    cs_string* key = (cs_string*)list->items[i].as.p;
+                    cs_map_set(set, key->data, cs_nil());
+                } else {
+                    // For non-string keys, convert to string
+                    char tmp[64];
+                    const char* key_str = NULL;
+                    if (list->items[i].type == CS_T_INT) {
+                        snprintf(tmp, sizeof(tmp), "%lld", (long long)list->items[i].as.i);
+                        key_str = tmp;
+                    } else if (list->items[i].type == CS_T_FLOAT) {
+                        snprintf(tmp, sizeof(tmp), "%g", list->items[i].as.f);
+                        key_str = tmp;
+                    } else if (list->items[i].type == CS_T_BOOL) {
+                        key_str = list->items[i].as.b ? "true" : "false";
+                    }
+                    if (key_str) {
+                        cs_map_set(set, key_str, cs_nil());
+                    }
+                }
+            }
+            cs_value_release(val);
+            return set;
+        }
+        cs_error(p->vm, "!!set requires map or list");
+        *ok = 0;
+        cs_value_release(val);
+        return cs_nil();
+    }
+    
+    // !!omap - Ordered map (list of single-entry maps)
+    if (strcmp(tag, "!!omap") == 0 || strcmp(tag, "tag:yaml.org,2002:omap") == 0) {
+        if (val.type == CS_T_LIST) {
+            // Verify it's a list of single-entry maps
+            cs_list_obj* list = (cs_list_obj*)val.as.p;
+            for (size_t i = 0; i < list->len; i++) {
+                if (list->items[i].type != CS_T_MAP) {
+                    cs_error(p->vm, "!!omap requires list of maps");
+                    *ok = 0;
+                    cs_value_release(val);
+                    return cs_nil();
+                }
+                cs_map_obj* entry = (cs_map_obj*)list->items[i].as.p;
+                if (entry->len != 1) {
+                    cs_error(p->vm, "!!omap entries must have exactly one key-value pair");
+                    *ok = 0;
+                    cs_value_release(val);
+                    return cs_nil();
+                }
+            }
+            // Valid omap - return as list
+            return val;
+        }
+        cs_error(p->vm, "!!omap requires list");
+        *ok = 0;
+        cs_value_release(val);
+        return cs_nil();
+    }
+    
+    // !!pairs - Ordered pairs (list of single-entry maps, duplicates allowed)
+    if (strcmp(tag, "!!pairs") == 0 || strcmp(tag, "tag:yaml.org,2002:pairs") == 0) {
+        if (val.type == CS_T_LIST) {
+            // Similar to !!omap but allows duplicate keys
+            cs_list_obj* list = (cs_list_obj*)val.as.p;
+            for (size_t i = 0; i < list->len; i++) {
+                if (list->items[i].type != CS_T_MAP) {
+                    cs_error(p->vm, "!!pairs requires list of maps");
+                    *ok = 0;
+                    cs_value_release(val);
+                    return cs_nil();
+                }
+                cs_map_obj* entry = (cs_map_obj*)list->items[i].as.p;
+                if (entry->len != 1) {
+                    cs_error(p->vm, "!!pairs entries must have exactly one key-value pair");
+                    *ok = 0;
+                    cs_value_release(val);
+                    return cs_nil();
+                }
+            }
+            // Valid pairs - return as list
+            return val;
+        }
+        cs_error(p->vm, "!!pairs requires list");
+        *ok = 0;
+        cs_value_release(val);
+        return cs_nil();
+    }
+    
     // For unknown tags, just return the value as-is
     // A full implementation would allow custom tag handlers
     return val;
@@ -4463,7 +4762,17 @@ static cs_value yaml_parse_quoted_string(yaml_parser* p, char quote_char, int* o
                 case '"': esc = '"'; break;
                 case '/': esc = '/'; break;
                 case '\\': esc = '\\'; break;
-                case 'u': 
+                case 'x':
+                    // \xHH - 2-digit hex escape (YAML 1.2.2)
+                    is_simple_esc = 0;
+                    if (!yaml_parse_unicode_escape(p, 2, &buf, &len, &cap)) {
+                        free(buf);
+                        cs_error(p->vm, "invalid \\xHH escape sequence");
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                    break;
+                case 'u':
                     is_simple_esc = 0;
                     if (!yaml_parse_unicode_escape(p, 4, &buf, &len, &cap)) {
                         free(buf);
@@ -4477,6 +4786,46 @@ static cs_value yaml_parse_quoted_string(yaml_parser* p, char quote_char, int* o
                     if (!yaml_parse_unicode_escape(p, 8, &buf, &len, &cap)) {
                         free(buf);
                         cs_error(p->vm, "invalid \\UXXXXXXXX escape sequence");
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                    break;
+                case 'N':
+                    // Next line (NEL) - U+0085 (YAML 1.2.2)
+                    is_simple_esc = 0;
+                    if (!yaml_encode_utf8(0x0085, &buf, &len, &cap)) {
+                        free(buf);
+                        cs_error(p->vm, "out of memory");
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                    break;
+                case '_':
+                    // Non-breaking space - U+00A0 (YAML 1.2.2)
+                    is_simple_esc = 0;
+                    if (!yaml_encode_utf8(0x00A0, &buf, &len, &cap)) {
+                        free(buf);
+                        cs_error(p->vm, "out of memory");
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                    break;
+                case 'L':
+                    // Line separator - U+2028 (YAML 1.2.2)
+                    is_simple_esc = 0;
+                    if (!yaml_encode_utf8(0x2028, &buf, &len, &cap)) {
+                        free(buf);
+                        cs_error(p->vm, "out of memory");
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                    break;
+                case 'P':
+                    // Paragraph separator - U+2029 (YAML 1.2.2)
+                    is_simple_esc = 0;
+                    if (!yaml_encode_utf8(0x2029, &buf, &len, &cap)) {
+                        free(buf);
+                        cs_error(p->vm, "out of memory");
                         *ok = 0;
                         return cs_nil();
                     }
@@ -4811,20 +5160,33 @@ static cs_value yaml_parse_flow_map(yaml_parser* p, int* ok) {
     return cs_nil();
 }
 
-static cs_value yaml_parse_plain_scalar(yaml_parser* p, int* ok) {
+static cs_value yaml_parse_plain_scalar(yaml_parser* p, int indent, int* ok) {
     *ok = 1;
 
     size_t start = p->pos;
     char* buf = NULL;
     size_t len = 0, cap = 0;
 
+    // YAML 1.2.2: Reserved indicators @ and ` cannot start plain scalars
+    int first_ch = yaml_peek(p);
+    if (first_ch == '@' || first_ch == '`') {
+        cs_error(p->vm, "reserved indicators @ and ` cannot start plain scalars");
+        *ok = 0;
+        return cs_nil();
+    }
+
     while (p->pos < p->len) {
         int ch = yaml_peek(p);
 
         // End conditions
         if (ch == '\n' || ch == ':' || ch == '#' || ch == ',' || ch == ']' || ch == '}' || ch == -1) {
-            // Special handling for ':' - must be followed by space or EOL
+            // Special handling for ':'
             if (ch == ':') {
+                // In flow context (indent < 0), ':' is ALWAYS a delimiter
+                if (indent < 0) {
+                    break;
+                }
+                // In block context, ':' must be followed by space or EOL
                 size_t save_pos = p->pos;
                 yaml_advance(p);
                 int next = yaml_peek(p);
@@ -4972,8 +5334,9 @@ static cs_value yaml_parse_list(yaml_parser* p, int base_indent, int* ok) {
             cs_list_push(list, item);
             cs_value_release(item);
         } else {
-            // Item is inline
-            cs_value item = yaml_parse_value(p, indent + 2, ok);
+            // Item is inline - parse at indent 0 but ensure we only parse current line
+            // The skip to end of line below ensures we don't consume multiple list items
+            cs_value item = yaml_parse_value(p, 0, ok);
             if (!*ok) {
                 cs_value_release(list);
                 return cs_nil();
@@ -5006,11 +5369,15 @@ static cs_value yaml_parse_map(yaml_parser* p, int base_indent, int* ok) {
     while (p->pos < p->len) {
         // Check current indent
         int indent = yaml_get_indent(p);
-        if (indent < base_indent) {
-            break;
-        }
-        if (indent > base_indent) {
-            break;
+        
+        // In block context, check indentation
+        if (base_indent >= 0) {
+            if (indent < base_indent) {
+                break;
+            }
+            if (indent > base_indent) {
+                break;
+            }
         }
 
         // Skip indent
@@ -5026,6 +5393,10 @@ static cs_value yaml_parse_map(yaml_parser* p, int base_indent, int* ok) {
                 yaml_skip_comment(p);
             }
             if (yaml_peek(p) == '\n') {
+                // In base_indent=0 context (inline list items), stop at newline
+                if (base_indent == 0) {
+                    break;
+                }
                 yaml_advance(p);
             }
             continue;
@@ -5103,7 +5474,7 @@ static cs_value yaml_parse_map(yaml_parser* p, int base_indent, int* ok) {
             }
         } else {
             // Regular key parsing
-            key = yaml_parse_plain_scalar(p, ok);
+            key = yaml_parse_plain_scalar(p, indent, ok);
             if (!*ok) {
                 cs_value_release(map);
                 return cs_nil();
@@ -5314,7 +5685,11 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
         // If value is on next line after tag, handle it recursively
         if (ch == '\n' && indent >= 0) {
             yaml_advance(p);  // Skip newline
-            cs_value result = yaml_parse_value(p, indent + 2, ok);
+            // Get the indentation level but don't skip it - let the parser handle it
+            int actual_indent = yaml_get_indent(p);
+            // Parse value at the actual indentation level
+            // Structured parsers (list/map) will handle skipping their own indentation
+            cs_value result = yaml_parse_value(p, actual_indent, ok);
             if (*ok && tag) {
                 result = yaml_apply_tag(p, tag, result, ok);
             }
@@ -5476,7 +5851,44 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
         return result;
     }
 
-    // List marker
+    // List marker - check if we're at indentation followed by '-'
+    // This handles cases where yaml_parse_value is called with parser at indentation
+    if (indent >= 0) {
+        size_t save = p->pos;
+        int line_indent = yaml_get_indent(p);
+        // Peek first non-space character on this line
+        for (int i = 0; i < line_indent && p->pos < p->len; i++) {
+            yaml_advance(p);
+        }
+        int first_char = yaml_peek(p);
+        // Check what follows the '-'
+        int next_char = -1;
+        if (first_char == '-') {
+            yaml_advance(p);
+            next_char = yaml_peek(p);
+        }
+        p->pos = save;
+
+        if (first_char == '-' && line_indent == indent && 
+            (next_char == ' ' || next_char == '\n' || next_char == '\t')) {
+            // This is a list at the expected indentation
+            cs_value result = yaml_parse_list(p, line_indent, ok);
+            if (*ok && tag) {
+                result = yaml_apply_tag(p, tag, result, ok);
+            }
+            free(tag);
+            if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
+                p->anchors[p->anchor_count].name = anchor_name;
+                p->anchors[p->anchor_count].value = cs_value_copy(result);
+                p->anchor_count++;
+            } else {
+                free(anchor_name);
+            }
+            return result;
+        }
+    }
+
+    // List marker (when already positioned at '-')
     if (ch == '-') {
         size_t save = p->pos;
         yaml_advance(p);
@@ -5523,25 +5935,27 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
         }
     }
 
-    // Look ahead for key: value pattern
+    // Look ahead for key: value pattern (only in block context)
     int looks_like_map = 0;
-    while (p->pos < p->len) {
-        int c = yaml_peek(p);
-        if (c == ':') {
-            yaml_advance(p);
-            int next = yaml_peek(p);
-            if (next == ' ' || next == '\n' || next == '\t' || next == -1) {
-                looks_like_map = 1;
+    if (indent >= 0) {  // Only do map lookahead in block context
+        while (p->pos < p->len) {
+            int c = yaml_peek(p);
+            if (c == ':') {
+                yaml_advance(p);
+                int next = yaml_peek(p);
+                if (next == ' ' || next == '\n' || next == '\t' || next == -1) {
+                    looks_like_map = 1;
+                }
+                break;
             }
-            break;
+            // Break on flow collection separators and terminators
+            if (c == '\n' || c == '[' || c == '{' || c == '-' || c == ',' || c == ']' || c == '}') {
+                break;
+            }
+            yaml_advance(p);
         }
-        // Break on flow collection separators and terminators
-        if (c == '\n' || c == '[' || c == '{' || c == '-' || c == ',' || c == ']' || c == '}') {
-            break;
-        }
-        yaml_advance(p);
+        p->pos = save_pos;
     }
-    p->pos = save_pos;
 
     if (looks_like_map) {
         cs_value result = yaml_parse_map(p, indent, ok);
@@ -5560,7 +5974,7 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
     }
 
     // Plain scalar
-    cs_value result = yaml_parse_plain_scalar(p, ok);
+    cs_value result = yaml_parse_plain_scalar(p, indent, ok);
     if (*ok && tag) {
         result = yaml_apply_tag(p, tag, result, ok);
     }
