@@ -3046,14 +3046,14 @@ static cs_value json_parse_string(json_parser* p, int* ok) {
             if (p->pos >= p->len) { *ok = 0; break; }
             char e = p->s[p->pos++];
             switch (e) {
-                case '"': c = '"'; break;
-                case '\\': c = '\\'; break;
-                case '/': c = '/'; break;
-                case 'b': c = '\b'; break;
-                case 'f': c = '\f'; break;
-                case 'n': c = '\n'; break;
-                case 'r': c = '\r'; break;
-                case 't': c = '\t'; break;
+                case '"': c = '"'; if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; } break;
+                case '\\': c = '\\'; if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; } break;
+                case '/': c = '/'; if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; } break;
+                case 'b': c = '\b'; if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; } break;
+                case 'f': c = '\f'; if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; } break;
+                case 'n': c = '\n'; if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; } break;
+                case 'r': c = '\r'; if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; } break;
+                case 't': c = '\t'; if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; } break;
                 case 'u': {
                     if (p->pos + 4 > p->len) { *ok = 0; break; }
                     int h1 = json_hex_val(p->s[p->pos++]);
@@ -3062,17 +3062,70 @@ static cs_value json_parse_string(json_parser* p, int* ok) {
                     int h4 = json_hex_val(p->s[p->pos++]);
                     if (h1 < 0 || h2 < 0 || h3 < 0 || h4 < 0) { *ok = 0; break; }
                     int code = (h1 << 12) | (h2 << 8) | (h3 << 4) | h4;
-                    if (code < 0x80) {
-                        c = (char)code;
+                    // Handle surrogate pairs
+                    if (code >= 0xD800 && code <= 0xDBFF) {
+                        // High surrogate, expect another \uXXXX
+                        if (p->pos + 6 <= p->len && p->s[p->pos] == '\\' && p->s[p->pos+1] == 'u') {
+                            p->pos += 2;
+                            int l1 = json_hex_val(p->s[p->pos++]);
+                            int l2 = json_hex_val(p->s[p->pos++]);
+                            int l3 = json_hex_val(p->s[p->pos++]);
+                            int l4 = json_hex_val(p->s[p->pos++]);
+                            if (l1 < 0 || l2 < 0 || l3 < 0 || l4 < 0) { *ok = 0; break; }
+                            int low = (l1 << 12) | (l2 << 8) | (l3 << 4) | l4;
+                            if (low >= 0xDC00 && low <= 0xDFFF) {
+                                // Valid surrogate pair
+                                uint32_t full = 0x10000 + (((code - 0xD800) << 10) | (low - 0xDC00));
+                                char utf8[4];
+                                int utf8len = 0;
+                                if (full <= 0x10FFFF) {
+                                    utf8[0] = 0xF0 | ((full >> 18) & 0x07);
+                                    utf8[1] = 0x80 | ((full >> 12) & 0x3F);
+                                    utf8[2] = 0x80 | ((full >> 6) & 0x3F);
+                                    utf8[3] = 0x80 | (full & 0x3F);
+                                    utf8len = 4;
+                                }
+                                if (!sb_append(&buf, &len, &cap, utf8, utf8len)) { *ok = 0; break; }
+                                break;
+                            } else {
+                                // Invalid low surrogate
+                                *ok = 0; break;
+                            }
+                        } else {
+                            // Missing low surrogate
+                            *ok = 0; break;
+                        }
+                    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+                        // Unexpected low surrogate
+                        *ok = 0; break;
                     } else {
-                        c = '?';
+                        // Encode as UTF-8
+                        char utf8[3];
+                        int utf8len = 0;
+                        if (code < 0x80) {
+                            utf8[0] = (char)code;
+                            utf8len = 1;
+                        } else if (code < 0x800) {
+                            utf8[0] = 0xC0 | ((code >> 6) & 0x1F);
+                            utf8[1] = 0x80 | (code & 0x3F);
+                            utf8len = 2;
+                        } else {
+                            utf8[0] = 0xE0 | ((code >> 12) & 0x0F);
+                            utf8[1] = 0x80 | ((code >> 6) & 0x3F);
+                            utf8[2] = 0x80 | (code & 0x3F);
+                            utf8len = 3;
+                        }
+                        if (!sb_append(&buf, &len, &cap, utf8, utf8len)) { *ok = 0; break; }
                     }
                     break;
                 }
                 default:
                     c = e;
+                    if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; }
                     break;
             }
+            if (!*ok) break;
+            continue;
         }
         if (!sb_append(&buf, &len, &cap, &c, 1)) { *ok = 0; break; }
     }
@@ -3282,10 +3335,15 @@ static int json_stringify_value(cs_vm* vm, cs_value v, char** buf, size_t* len, 
             int first = 1;
             for (size_t i = 0; i < m->cap; i++) {
                 if (!m->entries[i].in_use) continue;
+                // Only allow string keys
+                cs_value key = m->entries[i].key;
+                if (key.type != CS_T_STR) {
+                    cs_error(vm, "json_stringify(): object keys must be strings (RFC 8259)");
+                    return 0;
+                }
                 if (!first && !sb_append(buf, len, cap, ",", 1)) return 0;
                 first = 0;
-                char kbuf[128];
-                const char* kstr = value_repr(m->entries[i].key, kbuf, sizeof(kbuf));
+                const char* kstr = cs_to_cstr(key);
                 if (!json_append_escaped(buf, len, cap, kstr)) return 0;
                 if (!sb_append(buf, len, cap, ":", 1)) return 0;
                 if (!json_stringify_value(vm, m->entries[i].val, buf, len, cap, stack, depth + 1)) return 0;
@@ -3945,11 +4003,18 @@ static int nf_csv_stringify(cs_vm* vm, void* ud, int argc, const cs_value* argv,
 }
 
 // ============================================================================
-// YAML Parser (YAML 1.2 specification)
+// YAML Parser (YAML 1.2.2 specification)
 // ============================================================================
 
 #define YAML_MAX_ANCHORS 256
 #define YAML_MAX_INDENT_DEPTH 64
+#define YAML_MAX_TAG_DIRECTIVES 32
+
+// Tag directive
+typedef struct {
+    char* handle;
+    char* prefix;
+} yaml_tag_directive;
 
 typedef struct {
     char* name;
@@ -3967,6 +4032,10 @@ typedef struct {
     cs_vm* vm;
     yaml_anchor anchors[YAML_MAX_ANCHORS];
     size_t anchor_count;
+    yaml_tag_directive tag_directives[YAML_MAX_TAG_DIRECTIVES];
+    size_t tag_directive_count;
+    int yaml_version_major;
+    int yaml_version_minor;
 } yaml_parser;
 
 static void yaml_init(yaml_parser* p, const char* s, size_t len, cs_vm* vm) {
@@ -3978,6 +4047,9 @@ static void yaml_init(yaml_parser* p, const char* s, size_t len, cs_vm* vm) {
     p->indent_depth = 0;
     p->vm = vm;
     p->anchor_count = 0;
+    p->tag_directive_count = 0;
+    p->yaml_version_major = 1;
+    p->yaml_version_minor = 2;
     for (size_t i = 0; i < YAML_MAX_INDENT_DEPTH; i++) {
         p->indent_stack[i] = -1;
     }
@@ -3987,6 +4059,10 @@ static void yaml_cleanup(yaml_parser* p) {
     for (size_t i = 0; i < p->anchor_count; i++) {
         free(p->anchors[i].name);
         cs_value_release(p->anchors[i].value);
+    }
+    for (size_t i = 0; i < p->tag_directive_count; i++) {
+        free(p->tag_directives[i].handle);
+        free(p->tag_directives[i].prefix);
     }
 }
 
@@ -4060,6 +4136,7 @@ static int yaml_get_indent(yaml_parser* p) {
     return indent;
 }
 
+__attribute__((unused))
 static int yaml_skip_to_indent(yaml_parser* p, int expected_indent) {
     while (p->pos < p->len) {
         int ch = yaml_peek(p);
@@ -4080,6 +4157,7 @@ static int yaml_skip_to_indent(yaml_parser* p, int expected_indent) {
     return 0;
 }
 
+__attribute__((unused))
 static cs_value yaml_parse_null(yaml_parser* p, const char* str, size_t len) {
     if (len == 0) return cs_str(p->vm, "");
 
@@ -4092,6 +4170,7 @@ static cs_value yaml_parse_null(yaml_parser* p, const char* str, size_t len) {
 }
 
 static cs_value yaml_parse_bool(yaml_parser* p, const char* str, size_t len, int* is_bool) {
+    (void)p;
     *is_bool = 0;
 
     if (len == 4 && strncmp(str, "true", 4) == 0) {
@@ -4123,6 +4202,7 @@ static cs_value yaml_parse_bool(yaml_parser* p, const char* str, size_t len, int
 }
 
 static cs_value yaml_parse_number(yaml_parser* p, const char* str, size_t len, int* is_number) {
+    (void)p;
     *is_number = 0;
 
     if (len == 0) return cs_nil();
@@ -4186,6 +4266,146 @@ static cs_value yaml_parse_number(yaml_parser* p, const char* str, size_t len, i
 static cs_value yaml_parse_plain_scalar(yaml_parser* p, int* ok);
 static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok);
 
+// Parse Unicode escape sequence (\uXXXX or \UXXXXXXXX)
+static int yaml_parse_unicode_escape(yaml_parser* p, int num_digits, char** buf, size_t* len, size_t* cap) {
+    uint32_t codepoint = 0;
+    for (int i = 0; i < num_digits; i++) {
+        int ch = yaml_peek(p);
+        if (ch == -1) return 0;
+        yaml_advance(p);
+        
+        if (ch >= '0' && ch <= '9') {
+            codepoint = codepoint * 16 + (ch - '0');
+        } else if (ch >= 'a' && ch <= 'f') {
+            codepoint = codepoint * 16 + (ch - 'a' + 10);
+        } else if (ch >= 'A' && ch <= 'F') {
+            codepoint = codepoint * 16 + (ch - 'A' + 10);
+        } else {
+            return 0; // Invalid hex digit
+        }
+    }
+    
+    // Encode UTF-8
+    if (codepoint <= 0x7F) {
+        char c = (char)codepoint;
+        return sb_append(buf, len, cap, &c, 1);
+    } else if (codepoint <= 0x7FF) {
+        char c1 = (char)(0xC0 | (codepoint >> 6));
+        char c2 = (char)(0x80 | (codepoint & 0x3F));
+        return sb_append(buf, len, cap, &c1, 1) && sb_append(buf, len, cap, &c2, 1);
+    } else if (codepoint <= 0xFFFF) {
+        char c1 = (char)(0xE0 | (codepoint >> 12));
+        char c2 = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        char c3 = (char)(0x80 | (codepoint & 0x3F));
+        return sb_append(buf, len, cap, &c1, 1) && 
+               sb_append(buf, len, cap, &c2, 1) && 
+               sb_append(buf, len, cap, &c3, 1);
+    } else if (codepoint <= 0x10FFFF) {
+        char c1 = (char)(0xF0 | (codepoint >> 18));
+        char c2 = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+        char c3 = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        char c4 = (char)(0x80 | (codepoint & 0x3F));
+        return sb_append(buf, len, cap, &c1, 1) && 
+               sb_append(buf, len, cap, &c2, 1) && 
+               sb_append(buf, len, cap, &c3, 1) && 
+               sb_append(buf, len, cap, &c4, 1);
+    }
+    
+    return 0;
+}
+
+// Apply tag to value
+static cs_value yaml_apply_tag(yaml_parser* p, const char* tag, cs_value val, int* ok) {
+    if (!tag) return val;
+    
+    // Standard YAML 1.2 tags
+    if (strcmp(tag, "!!null") == 0 || strcmp(tag, "tag:yaml.org,2002:null") == 0) {
+        cs_value_release(val);
+        return cs_nil();
+    }
+    if (strcmp(tag, "!!bool") == 0 || strcmp(tag, "tag:yaml.org,2002:bool") == 0) {
+        if (val.type == CS_T_STR) {
+            cs_string* s = (cs_string*)val.as.p;
+            cs_value result;
+            if (strcmp(s->data, "true") == 0 || strcmp(s->data, "yes") == 0 || strcmp(s->data, "on") == 0) {
+                result = cs_bool(1);
+            } else if (strcmp(s->data, "false") == 0 || strcmp(s->data, "no") == 0 || strcmp(s->data, "off") == 0) {
+                result = cs_bool(0);
+            } else {
+                cs_error(p->vm, "invalid boolean value for !!bool tag");
+                *ok = 0;
+                cs_value_release(val);
+                return cs_nil();
+            }
+            cs_value_release(val);
+            return result;
+        }
+        return val;
+    }
+    if (strcmp(tag, "!!int") == 0 || strcmp(tag, "tag:yaml.org,2002:int") == 0) {
+        if (val.type == CS_T_STR) {
+            cs_string* s = (cs_string*)val.as.p;
+            char* end = NULL;
+            long long ival = strtoll(s->data, &end, 0);
+            if (end && *end == '\0') {
+                cs_value_release(val);
+                return cs_int(ival);
+            }
+            cs_error(p->vm, "invalid integer value for !!int tag");
+            *ok = 0;
+            cs_value_release(val);
+            return cs_nil();
+        }
+        return val;
+    }
+    if (strcmp(tag, "!!float") == 0 || strcmp(tag, "tag:yaml.org,2002:float") == 0) {
+        if (val.type == CS_T_STR) {
+            cs_string* s = (cs_string*)val.as.p;
+            char* end = NULL;
+            double fval = strtod(s->data, &end);
+            if (end && *end == '\0') {
+                cs_value_release(val);
+                return cs_float(fval);
+            }
+            cs_error(p->vm, "invalid float value for !!float tag");
+            *ok = 0;
+            cs_value_release(val);
+            return cs_nil();
+        }
+        return val;
+    }
+    if (strcmp(tag, "!!str") == 0 || strcmp(tag, "tag:yaml.org,2002:str") == 0) {
+        // Force to string
+        if (val.type != CS_T_STR) {
+            // Convert to string representation
+            char tmp[64];
+            switch (val.type) {
+                case CS_T_NIL:
+                    cs_value_release(val);
+                    return cs_str(p->vm, "null");
+                case CS_T_BOOL:
+                    cs_value_release(val);
+                    return cs_str(p->vm, val.as.b ? "true" : "false");
+                case CS_T_INT:
+                    snprintf(tmp, sizeof(tmp), "%lld", (long long)val.as.i);
+                    cs_value_release(val);
+                    return cs_str(p->vm, tmp);
+                case CS_T_FLOAT:
+                    snprintf(tmp, sizeof(tmp), "%g", val.as.f);
+                    cs_value_release(val);
+                    return cs_str(p->vm, tmp);
+                default:
+                    break;
+            }
+        }
+        return val;
+    }
+    
+    // For unknown tags, just return the value as-is
+    // A full implementation would allow custom tag handlers
+    return val;
+}
+
 static cs_value yaml_parse_quoted_string(yaml_parser* p, char quote_char, int* ok) {
     *ok = 1;
     yaml_advance(p); // Skip opening quote
@@ -4228,6 +4448,7 @@ static cs_value yaml_parse_quoted_string(yaml_parser* p, char quote_char, int* o
             yaml_advance(p);
 
             char esc;
+            int is_simple_esc = 1;
             switch (next) {
                 case '0': esc = '\0'; break;
                 case 'a': esc = '\a'; break;
@@ -4242,12 +4463,30 @@ static cs_value yaml_parse_quoted_string(yaml_parser* p, char quote_char, int* o
                 case '"': esc = '"'; break;
                 case '/': esc = '/'; break;
                 case '\\': esc = '\\'; break;
+                case 'u': 
+                    is_simple_esc = 0;
+                    if (!yaml_parse_unicode_escape(p, 4, &buf, &len, &cap)) {
+                        free(buf);
+                        cs_error(p->vm, "invalid \\uXXXX escape sequence");
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                    break;
+                case 'U':
+                    is_simple_esc = 0;
+                    if (!yaml_parse_unicode_escape(p, 8, &buf, &len, &cap)) {
+                        free(buf);
+                        cs_error(p->vm, "invalid \\UXXXXXXXX escape sequence");
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                    break;
                 default:
                     esc = (char)next;
                     break;
             }
 
-            if (!sb_append(&buf, &len, &cap, &esc, 1)) {
+            if (is_simple_esc && !sb_append(&buf, &len, &cap, &esc, 1)) {
                 free(buf);
                 cs_error(p->vm, "out of memory");
                 *ok = 0;
@@ -4274,7 +4513,25 @@ static cs_value yaml_parse_multiline(yaml_parser* p, char style, int base_indent
     *ok = 1;
     yaml_advance(p); // Skip | or >
 
-    // Skip optional chomping/indentation indicators
+    // Parse optional chomping indicator and/or indentation indicator
+    // Format: | or |- or |+ or |2 or |2- or |-2 etc.
+    char chomp = 'c'; // 'c' = clip (default), '-' = strip, '+' = keep
+    int explicit_indent = -1;
+    
+    // Read up to 2 indicators (chomp and indent, in either order)
+    for (int i = 0; i < 2; i++) {
+        int ch = yaml_peek(p);
+        if (ch == '+' || ch == '-') {
+            chomp = (char)ch;
+            yaml_advance(p);
+        } else if (ch >= '1' && ch <= '9') {
+            explicit_indent = ch - '0';
+            yaml_advance(p);
+        } else {
+            break;
+        }
+    }
+
     yaml_skip_ws_inline(p);
 
     // Skip to next line
@@ -4285,21 +4542,25 @@ static cs_value yaml_parse_multiline(yaml_parser* p, char style, int base_indent
         yaml_advance(p);
     }
 
-    // Determine content indent (first non-empty line)
-    int content_indent = -1;
-    size_t scan_pos = p->pos;
-    while (scan_pos < p->len) {
-        int indent = 0;
-        while (scan_pos < p->len && p->s[scan_pos] == ' ') {
-            indent++;
-            scan_pos++;
-        }
-        if (scan_pos < p->len && p->s[scan_pos] != '\n') {
-            content_indent = indent;
-            break;
-        }
-        if (scan_pos < p->len && p->s[scan_pos] == '\n') {
-            scan_pos++;
+    // Determine content indent
+    int content_indent = explicit_indent >= 0 ? (base_indent + explicit_indent) : -1;
+    
+    if (content_indent < 0) {
+        // Auto-detect from first non-empty line
+        size_t scan_pos = p->pos;
+        while (scan_pos < p->len) {
+            int indent = 0;
+            while (scan_pos < p->len && p->s[scan_pos] == ' ') {
+                indent++;
+                scan_pos++;
+            }
+            if (scan_pos < p->len && p->s[scan_pos] != '\n') {
+                content_indent = indent;
+                break;
+            }
+            if (scan_pos < p->len && p->s[scan_pos] == '\n') {
+                scan_pos++;
+            }
         }
     }
 
@@ -4311,6 +4572,8 @@ static cs_value yaml_parse_multiline(yaml_parser* p, char style, int base_indent
     size_t len = 0, cap = 0;
 
     int first_line = 1;
+    int trailing_newlines = 0;
+    
     while (p->pos < p->len) {
         // Check indent
         int indent = 0;
@@ -4327,38 +4590,45 @@ static cs_value yaml_parse_multiline(yaml_parser* p, char style, int base_indent
         // Empty line
         if (yaml_peek(p) == '\n') {
             if (style == '|') {
-                if (!sb_append(&buf, &len, &cap, "\n", 1)) {
-                    free(buf);
-                    cs_error(p->vm, "out of memory");
-                    *ok = 0;
-                    return cs_nil();
-                }
+                trailing_newlines++;
             } else {
-                if (!sb_append(&buf, &len, &cap, "\n", 1)) {
-                    free(buf);
-                    cs_error(p->vm, "out of memory");
-                    *ok = 0;
-                    return cs_nil();
-                }
+                trailing_newlines++;
             }
             yaml_advance(p);
             continue;
         }
 
-        // Add line separator for folded style
-        if (style == '>' && !first_line) {
-            if (!sb_append(&buf, &len, &cap, " ", 1)) {
-                free(buf);
-                cs_error(p->vm, "out of memory");
-                *ok = 0;
-                return cs_nil();
+        // Flush any pending newlines (these already include line breaks)
+        int had_trailing = 0;
+        if (trailing_newlines > 0) {
+            had_trailing = 1;
+            for (int i = 0; i < trailing_newlines; i++) {
+                if (!sb_append(&buf, &len, &cap, "\n", 1)) {
+                    free(buf);
+                    cs_error(p->vm, "out of memory");
+                    *ok = 0;
+                    return cs_nil();
+                }
             }
-        } else if (style == '|' && !first_line) {
-            if (!sb_append(&buf, &len, &cap, "\n", 1)) {
-                free(buf);
-                cs_error(p->vm, "out of memory");
-                *ok = 0;
-                return cs_nil();
+            trailing_newlines = 0;
+        }
+
+        // Add line separator for previous line (only if we didn't just flush trailing newlines)
+        if (!first_line && !had_trailing) {
+            if (style == '|') {
+                if (!sb_append(&buf, &len, &cap, "\n", 1)) {
+                    free(buf);
+                    cs_error(p->vm, "out of memory");
+                    *ok = 0;
+                    return cs_nil();
+                }
+            } else { // style == '>'
+                if (!sb_append(&buf, &len, &cap, " ", 1)) {
+                    free(buf);
+                    cs_error(p->vm, "out of memory");
+                    *ok = 0;
+                    return cs_nil();
+                }
             }
         }
         first_line = 0;
@@ -4376,25 +4646,31 @@ static cs_value yaml_parse_multiline(yaml_parser* p, char style, int base_indent
 
         if (yaml_peek(p) == '\n') {
             yaml_advance(p);
+            trailing_newlines = 1;
         }
     }
 
-    // Add final newline for literal style
-    if (style == '|' && len > 0) {
+    // Apply chomping indicator
+    if (chomp == 'c') {
+        // Clip: single newline at end
         if (!sb_append(&buf, &len, &cap, "\n", 1)) {
             free(buf);
             cs_error(p->vm, "out of memory");
             *ok = 0;
             return cs_nil();
         }
-    } else if (style == '>' && len > 0) {
-        if (!sb_append(&buf, &len, &cap, "\n", 1)) {
-            free(buf);
-            cs_error(p->vm, "out of memory");
-            *ok = 0;
-            return cs_nil();
+    } else if (chomp == '+') {
+        // Keep: preserve all trailing newlines
+        for (int i = 0; i < trailing_newlines; i++) {
+            if (!sb_append(&buf, &len, &cap, "\n", 1)) {
+                free(buf);
+                cs_error(p->vm, "out of memory");
+                *ok = 0;
+                return cs_nil();
+            }
         }
     }
+    // else chomp == '-': strip, don't add any trailing newlines
 
     if (!buf) buf = cs_strdup2_local("");
     if (!buf) {
@@ -4755,7 +5031,7 @@ static cs_value yaml_parse_map(yaml_parser* p, int base_indent, int* ok) {
             continue;
         }
 
-        // Check for list marker (not a map)
+        // Check for list marker (not a map) or document markers
         if (yaml_peek(p) == '-') {
             size_t save = p->pos;
             yaml_advance(p);
@@ -4764,13 +5040,74 @@ static cs_value yaml_parse_map(yaml_parser* p, int base_indent, int* ok) {
             if (next == ' ' || next == '\n' || next == '\t') {
                 break;
             }
+            // Check for document marker ---
+            if (next == '-' && p->pos + 2 < p->len && p->s[p->pos + 2] == '-') {
+                // Check if followed by whitespace or EOF
+                if (p->pos + 3 >= p->len || 
+                    p->s[p->pos + 3] == ' ' || p->s[p->pos + 3] == '\t' || p->s[p->pos + 3] == '\n') {
+                    break;
+                }
+            }
+        }
+        
+        // Check for document end marker ...
+        if (yaml_peek(p) == '.') {
+            if (p->pos + 2 < p->len && p->s[p->pos + 1] == '.' && p->s[p->pos + 2] == '.') {
+                // Check if followed by whitespace or EOF
+                if (p->pos + 3 >= p->len || 
+                    p->s[p->pos + 3] == ' ' || p->s[p->pos + 3] == '\t' || p->s[p->pos + 3] == '\n') {
+                    break;
+                }
+            }
         }
 
-        // Parse key
-        cs_value key = yaml_parse_plain_scalar(p, ok);
-        if (!*ok) {
-            cs_value_release(map);
-            return cs_nil();
+        // Check for explicit key indicator '?'
+        cs_value key;
+        if (yaml_peek(p) == '?') {
+            int explicit_key = 1;
+            yaml_advance(p);
+            yaml_skip_ws_inline(p);
+            
+            // Parse complex key (can be any value type)
+            if (yaml_peek(p) == '\n') {
+                yaml_advance(p);
+                key = yaml_parse_value(p, base_indent + 2, ok);
+            } else {
+                key = yaml_parse_value(p, base_indent, ok);
+            }
+            
+            if (!*ok) {
+                cs_value_release(map);
+                return cs_nil();
+            }
+            
+            // Skip to value indicator ':'
+            yaml_skip_ws_inline(p);
+            if (yaml_peek(p) == '\n') {
+                yaml_advance(p);
+                // Value on next line
+                int val_indent = yaml_get_indent(p);
+                // Skip indent
+                for (int i = 0; i < val_indent && p->pos < p->len; i++) {
+                    yaml_advance(p);
+                }
+                yaml_skip_ws_inline(p);
+                // Now check for ':'
+                if (yaml_peek(p) != ':') {
+                    cs_error(p->vm, "expected ':' for explicit key");
+                    cs_value_release(key);
+                    cs_value_release(map);
+                    *ok = 0;
+                    return cs_nil();
+                }
+            }
+        } else {
+            // Regular key parsing
+            key = yaml_parse_plain_scalar(p, ok);
+            if (!*ok) {
+                cs_value_release(map);
+                return cs_nil();
+            }
         }
 
         yaml_skip_ws_inline(p);
@@ -4785,6 +5122,15 @@ static cs_value yaml_parse_map(yaml_parser* p, int base_indent, int* ok) {
 
         yaml_skip_ws_inline(p);
         yaml_skip_comment(p);
+
+        // Check for merge operator '<<'
+        int is_merge = 0;
+        if (key.type == CS_T_STR) {
+            cs_string* key_str = (cs_string*)key.as.p;
+            if (strcmp(key_str->data, "<<") == 0) {
+                is_merge = 1;
+            }
+        }
 
         // Parse value
         cs_value val;
@@ -4801,14 +5147,92 @@ static cs_value yaml_parse_map(yaml_parser* p, int base_indent, int* ok) {
             return cs_nil();
         }
 
-        // Set in map
-        if (key.type == CS_T_STR) {
-            cs_string* key_str = (cs_string*)key.as.p;
-            cs_map_set(map, key_str->data, val);
-        }
+        // Handle merge operator
+        if (is_merge) {
+            // Merge the map(s) into current map
+            if (val.type == CS_T_MAP) {
+                // Merge single map - get all keys and iterate
+                cs_value src_keys = cs_map_keys(p->vm, val);
+                if (src_keys.type == CS_T_LIST) {
+                    size_t num_keys = cs_list_len(src_keys);
+                    for (size_t i = 0; i < num_keys; i++) {
+                        cs_value src_key = cs_list_get(src_keys, i);
+                        if (src_key.type == CS_T_STR) {
+                            cs_string* key_str = (cs_string*)src_key.as.p;
+                            cs_value existing = cs_map_get(map, key_str->data);
+                            // Only merge if key doesn't already exist
+                            if (existing.type == CS_T_NIL) {
+                                cs_value src_val = cs_map_get(val, key_str->data);
+                                cs_map_set(map, key_str->data, src_val);
+                                cs_value_release(src_val);
+                            }
+                            cs_value_release(existing);
+                        }
+                        cs_value_release(src_key);
+                    }
+                }
+                cs_value_release(src_keys);
+            } else if (val.type == CS_T_LIST) {
+                // Merge list of maps
+                size_t list_len = cs_list_len(val);
+                for (size_t i = 0; i < list_len; i++) {
+                    cs_value item = cs_list_get(val, i);
+                    if (item.type == CS_T_MAP) {
+                        // Get all keys from this map and iterate
+                        cs_value src_keys = cs_map_keys(p->vm, item);
+                        if (src_keys.type == CS_T_LIST) {
+                            size_t num_keys = cs_list_len(src_keys);
+                            for (size_t j = 0; j < num_keys; j++) {
+                                cs_value src_key = cs_list_get(src_keys, j);
+                                if (src_key.type == CS_T_STR) {
+                                    cs_string* key_str = (cs_string*)src_key.as.p;
+                                    cs_value existing = cs_map_get(map, key_str->data);
+                                    if (existing.type == CS_T_NIL) {
+                                        cs_value src_val = cs_map_get(item, key_str->data);
+                                        cs_map_set(map, key_str->data, src_val);
+                                        cs_value_release(src_val);
+                                    }
+                                    cs_value_release(existing);
+                                }
+                                cs_value_release(src_key);
+                            }
+                        }
+                        cs_value_release(src_keys);
+                    }
+                    cs_value_release(item);
+                }
+            }
+            cs_value_release(key);
+            cs_value_release(val);
+        } else {
+            // Set in map (convert non-string keys to strings for map compatibility)
+            if (key.type == CS_T_STR) {
+                cs_string* key_str = (cs_string*)key.as.p;
+                cs_map_set(map, key_str->data, val);
+            } else {
+                // Convert key to string representation
+                char tmp[256];
+                switch (key.type) {
+                    case CS_T_INT:
+                        snprintf(tmp, sizeof(tmp), "%lld", (long long)key.as.i);
+                        cs_map_set(map, tmp, val);
+                        break;
+                    case CS_T_FLOAT:
+                        snprintf(tmp, sizeof(tmp), "%g", key.as.f);
+                        cs_map_set(map, tmp, val);
+                        break;
+                    case CS_T_BOOL:
+                        cs_map_set(map, key.as.b ? "true" : "false", val);
+                        break;
+                    default:
+                        // For complex keys (lists, maps), just skip
+                        break;
+                }
+            }
 
-        cs_value_release(key);
-        cs_value_release(val);
+            cs_value_release(key);
+            cs_value_release(val);
+        }
 
         // Skip to end of line
         yaml_skip_ws_inline(p);
@@ -4824,7 +5248,11 @@ static cs_value yaml_parse_map(yaml_parser* p, int base_indent, int* ok) {
 static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
     *ok = 1;
 
-    yaml_skip_ws_inline(p);
+    // Only skip inline whitespace in flow context (indent < 0)
+    // In block context, indentation is meaningful and handled by structure parsers
+    if (indent < 0) {
+        yaml_skip_ws_inline(p);
+    }
 
     int ch = yaml_peek(p);
 
@@ -4832,18 +5260,92 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
         return cs_nil();
     }
 
+    // Tag (!!type or !tag)
+    char* tag = NULL;
+    if (ch == '!') {
+        yaml_advance(p);
+        size_t start = p->pos;
+        
+        // Check for !! (standard tag)
+        if (yaml_peek(p) == '!') {
+            yaml_advance(p);
+            start = p->pos;
+            // Read tag name
+            while (p->pos < p->len) {
+                int c = yaml_peek(p);
+                if (c == ' ' || c == '\n' || c == '\t' || c == ':' || c == ',' || c == '[' || c == ']' || c == '{' || c == '}') {
+                    break;
+                }
+                yaml_advance(p);
+            }
+            size_t tag_len = p->pos - start;
+            if (tag_len > 0) {
+                tag = (char*)malloc(tag_len + 3);
+                if (tag) {
+                    tag[0] = '!';
+                    tag[1] = '!';
+                    memcpy(tag + 2, p->s + start, tag_len);
+                    tag[tag_len + 2] = '\0';
+                }
+            }
+        } else {
+            // Local tag or tag handle
+            while (p->pos < p->len) {
+                int c = yaml_peek(p);
+                if (c == ' ' || c == '\n' || c == '\t' || c == ':' || c == ',' || c == '[' || c == ']' || c == '{' || c == '}') {
+                    break;
+                }
+                yaml_advance(p);
+            }
+            size_t tag_len = p->pos - start;
+            if (tag_len > 0) {
+                tag = (char*)malloc(tag_len + 2);
+                if (tag) {
+                    tag[0] = '!';
+                    memcpy(tag + 1, p->s + start, tag_len);
+                    tag[tag_len + 1] = '\0';
+                }
+            }
+        }
+
+        yaml_skip_ws_inline(p);
+        ch = yaml_peek(p);
+
+        // If value is on next line after tag, handle it recursively
+        if (ch == '\n' && indent >= 0) {
+            yaml_advance(p);  // Skip newline
+            cs_value result = yaml_parse_value(p, indent + 2, ok);
+            if (*ok && tag) {
+                result = yaml_apply_tag(p, tag, result, ok);
+            }
+            free(tag);
+            return result;
+        }
+    }
+
     // Flow list
     if (ch == '[') {
-        return yaml_parse_flow_list(p, ok);
+        cs_value result = yaml_parse_flow_list(p, ok);
+        if (*ok && tag) {
+            result = yaml_apply_tag(p, tag, result, ok);
+        }
+        free(tag);
+        return result;
     }
 
     // Flow map
     if (ch == '{') {
-        return yaml_parse_flow_map(p, ok);
+        cs_value result = yaml_parse_flow_map(p, ok);
+        if (*ok && tag) {
+            result = yaml_apply_tag(p, tag, result, ok);
+        }
+        free(tag);
+        return result;
     }
 
     // Alias
     if (ch == '*') {
+        free(tag);
         return yaml_parse_alias(p, ok);
     }
 
@@ -4869,11 +5371,84 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
         }
         yaml_skip_ws_inline(p);
         ch = yaml_peek(p);
+
+        // Check for tag after anchor
+        if (ch == '!' && !tag) {
+            yaml_advance(p);
+            size_t start = p->pos;
+
+            // Check for !! (standard tag)
+            if (yaml_peek(p) == '!') {
+                yaml_advance(p);
+                start = p->pos;
+                // Read tag name
+                while (p->pos < p->len) {
+                    int c = yaml_peek(p);
+                    if (c == ' ' || c == '\n' || c == '\t' || c == ':' || c == ',' || c == '[' || c == ']' || c == '{' || c == '}') {
+                        break;
+                    }
+                    yaml_advance(p);
+                }
+                size_t tag_len = p->pos - start;
+                if (tag_len > 0) {
+                    tag = (char*)malloc(tag_len + 3);
+                    if (tag) {
+                        tag[0] = '!';
+                        tag[1] = '!';
+                        memcpy(tag + 2, p->s + start, tag_len);
+                        tag[tag_len + 2] = '\0';
+                    }
+                }
+            } else {
+                // Local tag or tag handle
+                while (p->pos < p->len) {
+                    int c = yaml_peek(p);
+                    if (c == ' ' || c == '\n' || c == '\t' || c == ':' || c == ',' || c == '[' || c == ']' || c == '{' || c == '}') {
+                        break;
+                    }
+                    yaml_advance(p);
+                }
+                size_t tag_len = p->pos - start;
+                if (tag_len > 0) {
+                    tag = (char*)malloc(tag_len + 2);
+                    if (tag) {
+                        tag[0] = '!';
+                        memcpy(tag + 1, p->s + start, tag_len);
+                        tag[tag_len + 1] = '\0';
+                    }
+                }
+            }
+
+            yaml_skip_ws_inline(p);
+            ch = yaml_peek(p);
+        }
+
+        // If value is on next line after anchor, handle it recursively
+        if (ch == '\n' && indent >= 0) {
+            yaml_advance(p);  // Skip newline
+            cs_value result = yaml_parse_value(p, indent + 2, ok);
+            if (*ok && tag) {
+                result = yaml_apply_tag(p, tag, result, ok);
+            }
+            if (*ok && anchor_name && p->anchor_count < YAML_MAX_ANCHORS) {
+                p->anchors[p->anchor_count].name = anchor_name;
+                p->anchors[p->anchor_count].value = cs_value_copy(result);
+                p->anchor_count++;
+            } else {
+                free(anchor_name);
+            }
+            free(tag);
+            return result;
+        }
     }
 
     // Quoted string
     if (ch == '"' || ch == '\'') {
         cs_value result = yaml_parse_quoted_string(p, (char)ch, ok);
+        if (*ok && tag) {
+            result = yaml_apply_tag(p, tag, result, ok);
+        }
+        free(tag);
         if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
             p->anchors[p->anchor_count].name = anchor_name;
             p->anchors[p->anchor_count].value = cs_value_copy(result);
@@ -4887,6 +5462,10 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
     // Multiline literal
     if (ch == '|' || ch == '>') {
         cs_value result = yaml_parse_multiline(p, (char)ch, indent, ok);
+        if (*ok && tag) {
+            result = yaml_apply_tag(p, tag, result, ok);
+        }
+        free(tag);
         if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
             p->anchors[p->anchor_count].name = anchor_name;
             p->anchors[p->anchor_count].value = cs_value_copy(result);
@@ -4905,6 +5484,10 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
         p->pos = save;
         if (next == ' ' || next == '\n' || next == '\t') {
             cs_value result = yaml_parse_list(p, indent, ok);
+            if (*ok && tag) {
+                result = yaml_apply_tag(p, tag, result, ok);
+            }
+            free(tag);
             if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
                 p->anchors[p->anchor_count].name = anchor_name;
                 p->anchors[p->anchor_count].value = cs_value_copy(result);
@@ -4919,6 +5502,27 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
     // Try to parse as map or plain scalar
     size_t save_pos = p->pos;
 
+    // Check for explicit key indicator ? at start
+    if (yaml_peek(p) == '?') {
+        int next = p->pos + 1 < p->len ? p->s[p->pos + 1] : -1;
+        if (next == ' ' || next == '\n' || next == '\t' || next == -1) {
+            // Explicit key indicator - this is a map
+            cs_value result = yaml_parse_map(p, indent, ok);
+            if (*ok && tag) {
+                result = yaml_apply_tag(p, tag, result, ok);
+            }
+            free(tag);
+            if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
+                p->anchors[p->anchor_count].name = anchor_name;
+                p->anchors[p->anchor_count].value = cs_value_copy(result);
+                p->anchor_count++;
+            } else {
+                free(anchor_name);
+            }
+            return result;
+        }
+    }
+
     // Look ahead for key: value pattern
     int looks_like_map = 0;
     while (p->pos < p->len) {
@@ -4931,7 +5535,8 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
             }
             break;
         }
-        if (c == '\n' || c == '[' || c == '{' || c == '-') {
+        // Break on flow collection separators and terminators
+        if (c == '\n' || c == '[' || c == '{' || c == '-' || c == ',' || c == ']' || c == '}') {
             break;
         }
         yaml_advance(p);
@@ -4940,6 +5545,10 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
 
     if (looks_like_map) {
         cs_value result = yaml_parse_map(p, indent, ok);
+        if (*ok && tag) {
+            result = yaml_apply_tag(p, tag, result, ok);
+        }
+        free(tag);
         if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
             p->anchors[p->anchor_count].name = anchor_name;
             p->anchors[p->anchor_count].value = cs_value_copy(result);
@@ -4952,6 +5561,10 @@ static cs_value yaml_parse_value(yaml_parser* p, int indent, int* ok) {
 
     // Plain scalar
     cs_value result = yaml_parse_plain_scalar(p, ok);
+    if (*ok && tag) {
+        result = yaml_apply_tag(p, tag, result, ok);
+    }
+    free(tag);
     if (anchor_name && *ok && p->anchor_count < YAML_MAX_ANCHORS) {
         p->anchors[p->anchor_count].name = anchor_name;
         p->anchors[p->anchor_count].value = cs_value_copy(result);
@@ -4977,9 +5590,103 @@ static int nf_yaml_parse(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs
     yaml_parser p;
     yaml_init(&p, text, text_len, vm);
 
+    // Parse directives
+    while (p.pos < p.len) {
+        // Skip whitespace and comments
+        while (p.pos < p.len) {
+            int ch = yaml_peek(&p);
+            if (ch == ' ' || ch == '\t') {
+                yaml_advance(&p);
+            } else if (ch == '#') {
+                yaml_skip_comment(&p);
+                if (yaml_peek(&p) == '\n') {
+                    yaml_advance(&p);
+                }
+            } else if (ch == '\n') {
+                yaml_advance(&p);
+            } else {
+                break;
+            }
+        }
+        
+        // Check for %YAML directive
+        if (p.pos + 5 < p.len && strncmp(p.s + p.pos, "%YAML", 5) == 0) {
+            p.pos += 5;
+            yaml_skip_ws_inline(&p);
+            
+            // Parse version (e.g., "1.2")
+            if (p.pos < p.len && yaml_peek(&p) >= '0' && yaml_peek(&p) <= '9') {
+                p.yaml_version_major = yaml_peek(&p) - '0';
+                yaml_advance(&p);
+                if (yaml_peek(&p) == '.') {
+                    yaml_advance(&p);
+                    if (p.pos < p.len && yaml_peek(&p) >= '0' && yaml_peek(&p) <= '9') {
+                        p.yaml_version_minor = yaml_peek(&p) - '0';
+                        yaml_advance(&p);
+                    }
+                }
+            }
+            
+            // Skip to end of line
+            while (p.pos < p.len && yaml_peek(&p) != '\n') {
+                yaml_advance(&p);
+            }
+            if (yaml_peek(&p) == '\n') {
+                yaml_advance(&p);
+            }
+            continue;
+        }
+        
+        // Check for %TAG directive
+        if (p.pos + 4 < p.len && strncmp(p.s + p.pos, "%TAG", 4) == 0) {
+            p.pos += 4;
+            yaml_skip_ws_inline(&p);
+            
+            // Parse handle
+            size_t handle_start = p.pos;
+            while (p.pos < p.len && yaml_peek(&p) != ' ' && yaml_peek(&p) != '\t') {
+                yaml_advance(&p);
+            }
+            size_t handle_len = p.pos - handle_start;
+            
+            yaml_skip_ws_inline(&p);
+            
+            // Parse prefix
+            size_t prefix_start = p.pos;
+            while (p.pos < p.len && yaml_peek(&p) != ' ' && yaml_peek(&p) != '\t' && yaml_peek(&p) != '\n') {
+                yaml_advance(&p);
+            }
+            size_t prefix_len = p.pos - prefix_start;
+            
+            // Store tag directive
+            if (handle_len > 0 && prefix_len > 0 && p.tag_directive_count < YAML_MAX_TAG_DIRECTIVES) {
+                p.tag_directives[p.tag_directive_count].handle = (char*)malloc(handle_len + 1);
+                p.tag_directives[p.tag_directive_count].prefix = (char*)malloc(prefix_len + 1);
+                if (p.tag_directives[p.tag_directive_count].handle && p.tag_directives[p.tag_directive_count].prefix) {
+                    memcpy(p.tag_directives[p.tag_directive_count].handle, p.s + handle_start, handle_len);
+                    p.tag_directives[p.tag_directive_count].handle[handle_len] = '\0';
+                    memcpy(p.tag_directives[p.tag_directive_count].prefix, p.s + prefix_start, prefix_len);
+                    p.tag_directives[p.tag_directive_count].prefix[prefix_len] = '\0';
+                    p.tag_directive_count++;
+                }
+            }
+            
+            // Skip to end of line
+            while (p.pos < p.len && yaml_peek(&p) != '\n') {
+                yaml_advance(&p);
+            }
+            if (yaml_peek(&p) == '\n') {
+                yaml_advance(&p);
+            }
+            continue;
+        }
+        
+        break;
+    }
+
     // Skip document marker if present
-    if (text_len >= 3 && strncmp(text, "---", 3) == 0) {
-        p.pos = 3;
+    if (p.pos + 3 <= p.len && strncmp(p.s + p.pos, "---", 3) == 0) {
+        p.pos += 3;
         if (yaml_peek(&p) == '\n') {
             yaml_advance(&p);
         }
@@ -5287,6 +5994,226 @@ static int yaml_stringify_value(cs_vm* vm, cs_value val, char** buf, size_t* len
     }
 
     return 1;
+}
+
+// Parse multiple YAML documents from a stream
+static int nf_yaml_parse_all(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1 || argv[0].type != CS_T_STR) {
+        cs_error(vm, "yaml_parse_all() requires a string argument");
+        return 1;
+    }
+
+    cs_string* str_obj = (cs_string*)argv[0].as.p;
+    const char* text = str_obj->data;
+    size_t text_len = str_obj->len;
+
+    // Create list to hold all documents
+    cs_value docs = cs_list(vm);
+    if (docs.type != CS_T_LIST) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+
+    yaml_parser p;
+    yaml_init(&p, text, text_len, vm);
+
+    while (p.pos < p.len) {
+        // Parse directives for this document
+        while (p.pos < p.len) {
+            // Skip whitespace and comments
+            while (p.pos < p.len) {
+                int ch = yaml_peek(&p);
+                if (ch == ' ' || ch == '\t') {
+                    yaml_advance(&p);
+                } else if (ch == '#') {
+                    yaml_skip_comment(&p);
+                    if (yaml_peek(&p) == '\n') {
+                        yaml_advance(&p);
+                    }
+                } else if (ch == '\n') {
+                    yaml_advance(&p);
+                } else {
+                    break;
+                }
+            }
+            
+            // Check for %YAML or %TAG directives
+            if (p.pos + 5 < p.len && strncmp(p.s + p.pos, "%YAML", 5) == 0) {
+                p.pos += 5;
+                yaml_skip_ws_inline(&p);
+                if (p.pos < p.len && yaml_peek(&p) >= '0' && yaml_peek(&p) <= '9') {
+                    p.yaml_version_major = yaml_peek(&p) - '0';
+                    yaml_advance(&p);
+                    if (yaml_peek(&p) == '.') {
+                        yaml_advance(&p);
+                        if (p.pos < p.len && yaml_peek(&p) >= '0' && yaml_peek(&p) <= '9') {
+                            p.yaml_version_minor = yaml_peek(&p) - '0';
+                            yaml_advance(&p);
+                        }
+                    }
+                }
+                while (p.pos < p.len && yaml_peek(&p) != '\n') {
+                    yaml_advance(&p);
+                }
+                if (yaml_peek(&p) == '\n') {
+                    yaml_advance(&p);
+                }
+                continue;
+            }
+            
+            if (p.pos + 4 < p.len && strncmp(p.s + p.pos, "%TAG", 4) == 0) {
+                p.pos += 4;
+                yaml_skip_ws_inline(&p);
+                size_t handle_start = p.pos;
+                while (p.pos < p.len && yaml_peek(&p) != ' ' && yaml_peek(&p) != '\t') {
+                    yaml_advance(&p);
+                }
+                size_t handle_len = p.pos - handle_start;
+                yaml_skip_ws_inline(&p);
+                size_t prefix_start = p.pos;
+                while (p.pos < p.len && yaml_peek(&p) != ' ' && yaml_peek(&p) != '\t' && yaml_peek(&p) != '\n') {
+                    yaml_advance(&p);
+                }
+                size_t prefix_len = p.pos - prefix_start;
+                if (handle_len > 0 && prefix_len > 0 && p.tag_directive_count < YAML_MAX_TAG_DIRECTIVES) {
+                    p.tag_directives[p.tag_directive_count].handle = (char*)malloc(handle_len + 1);
+                    p.tag_directives[p.tag_directive_count].prefix = (char*)malloc(prefix_len + 1);
+                    if (p.tag_directives[p.tag_directive_count].handle && p.tag_directives[p.tag_directive_count].prefix) {
+                        memcpy(p.tag_directives[p.tag_directive_count].handle, p.s + handle_start, handle_len);
+                        p.tag_directives[p.tag_directive_count].handle[handle_len] = '\0';
+                        memcpy(p.tag_directives[p.tag_directive_count].prefix, p.s + prefix_start, prefix_len);
+                        p.tag_directives[p.tag_directive_count].prefix[prefix_len] = '\0';
+                        p.tag_directive_count++;
+                    }
+                }
+                while (p.pos < p.len && yaml_peek(&p) != '\n') {
+                    yaml_advance(&p);
+                }
+                if (yaml_peek(&p) == '\n') {
+                    yaml_advance(&p);
+                }
+                continue;
+            }
+            
+            break;
+        }
+
+        // Skip document start marker ---
+        if (p.pos + 3 <= p.len && strncmp(p.s + p.pos, "---", 3) == 0) {
+            p.pos += 3;
+            // Ensure it's followed by whitespace or newline
+            int ch = yaml_peek(&p);
+            if (ch == ' ' || ch == '\t' || ch == '\n' || ch == -1) {
+                if (ch == '\n') {
+                    yaml_advance(&p);
+                }
+            } else {
+                // Not a document marker, reset
+                p.pos -= 3;
+            }
+        }
+
+        // Skip whitespace and comments
+        while (p.pos < p.len) {
+            int ch = yaml_peek(&p);
+            if (ch == ' ' || ch == '\t') {
+                yaml_advance(&p);
+            } else if (ch == '#') {
+                yaml_skip_comment(&p);
+                if (yaml_peek(&p) == '\n') {
+                    yaml_advance(&p);
+                }
+            } else if (ch == '\n') {
+                yaml_advance(&p);
+            } else {
+                break;
+            }
+        }
+
+        if (p.pos >= p.len) {
+            break;
+        }
+
+        // Check for document end marker ...
+        if (p.pos + 3 <= p.len && strncmp(p.s + p.pos, "...", 3) == 0) {
+            p.pos += 3;
+            // Skip to next document
+            while (p.pos < p.len && yaml_peek(&p) != '\n') {
+                yaml_advance(&p);
+            }
+            if (yaml_peek(&p) == '\n') {
+                yaml_advance(&p);
+            }
+            continue;
+        }
+
+        // Parse document
+        int ok = 1;
+        cs_value doc = yaml_parse_value(&p, 0, &ok);
+        
+        if (!ok) {
+            cs_value_release(docs);
+            yaml_cleanup(&p);
+            return 1;
+        }
+
+        cs_list_push(docs, doc);
+        cs_value_release(doc);
+
+        // Clean up anchors and directives from this document
+        for (size_t i = 0; i < p.anchor_count; i++) {
+            free(p.anchors[i].name);
+            cs_value_release(p.anchors[i].value);
+        }
+        p.anchor_count = 0;
+        for (size_t i = 0; i < p.tag_directive_count; i++) {
+            free(p.tag_directives[i].handle);
+            free(p.tag_directives[i].prefix);
+        }
+        p.tag_directive_count = 0;
+
+        // Skip to document end or next document start
+        while (p.pos < p.len) {
+            // Skip whitespace
+            while (p.pos < p.len) {
+                int ch = yaml_peek(&p);
+                if (ch == ' ' || ch == '\t' || ch == '\n') {
+                    yaml_advance(&p);
+                } else if (ch == '#') {
+                    yaml_skip_comment(&p);
+                } else {
+                    break;
+                }
+            }
+
+            // Check for document end ...
+            if (p.pos + 3 <= p.len && strncmp(p.s + p.pos, "...", 3) == 0) {
+                p.pos += 3;
+                while (p.pos < p.len && yaml_peek(&p) != '\n') {
+                    yaml_advance(&p);
+                }
+                if (yaml_peek(&p) == '\n') {
+                    yaml_advance(&p);
+                }
+                break;
+            }
+
+            // Check for next document start ---
+            if (p.pos + 3 <= p.len && strncmp(p.s + p.pos, "---", 3) == 0) {
+                // Next document
+                break;
+            }
+
+            // Otherwise continue parsing (single document)
+            break;
+        }
+    }
+
+    yaml_cleanup(&p);
+    *out = docs;
+    return 0;
 }
 
 static int nf_yaml_stringify(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
@@ -8297,6 +9224,7 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "csv_parse",     nf_csv_parse,     NULL);
     cs_register_native(vm, "csv_stringify",  nf_csv_stringify,  NULL);
     cs_register_native(vm, "yaml_parse",    nf_yaml_parse,    NULL);
+    cs_register_native(vm, "yaml_parse_all", nf_yaml_parse_all, NULL);
     cs_register_native(vm, "yaml_stringify", nf_yaml_stringify, NULL);
     cs_register_native(vm, "xml_parse",     nf_xml_parse,     NULL);
     cs_register_native(vm, "xml_stringify",  nf_xml_stringify,  NULL);
