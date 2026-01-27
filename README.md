@@ -4,6 +4,12 @@ A lightweight C99 VM for a small scripting language. This repository contains a 
 
 ---
 
+## Documentation & Wiki
+
+See the [Wiki Home](wiki/Home.md) for detailed documentation, guides, and language reference.
+
+---
+
 ## What’s Included
 
 - **Core runtime:** lexer, parser, AST, VM, and a small standard library.
