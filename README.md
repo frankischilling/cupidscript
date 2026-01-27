@@ -6,7 +6,7 @@ A lightweight C99 VM for a small scripting language. This repository contains a 
 
 ## Documentation & Wiki
 
-See the [Wiki Home](wiki/Home.md) for detailed documentation, guides, and language reference.
+See the [Wiki Home](https://github.com/frankischilling/cupidscript/wiki) for detailed documentation, guides, and language reference.
 
 ---
 
