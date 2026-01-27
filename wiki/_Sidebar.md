@@ -24,6 +24,7 @@
 * [Errors & Stack Traces](Errors-and-Debugging)
 * [Host Safety Controls](Host-Safety-Controls)
 * [Tests](Tests)
+* [Data Formats](Data-Formats)
 
 ### Advanced
 

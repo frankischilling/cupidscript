@@ -23,6 +23,10 @@
 #include <sys/wait.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <fnmatch.h>
+#include <sys/inotify.h>
+#include <poll.h>
+#include <zlib.h>
 #endif
 
 #if defined(_WIN32)
@@ -1920,6 +1924,1078 @@ static int nf_subprocess(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs
     *out = out_map;
     return 0;
 }
+
+// ---------- Advanced File Handling (Linux only) ----------
+
+#if defined(__linux__)
+
+// ---------- Glob Patterns ----------
+
+typedef struct {
+    char** patterns;
+    size_t pattern_count;
+    int recursive;
+    const char* base_path;
+} glob_matcher;
+
+static int glob_match_simple(const char* pattern, const char* str) {
+    // Simple glob matching with *, ?, [], {}
+    return fnmatch(pattern, str, FNM_PATHNAME | FNM_PERIOD) == 0;
+}
+
+static int glob_has_double_star(const char* pattern) {
+    const char* p = pattern;
+    while (*p) {
+        if (p[0] == '*' && p[1] == '*') return 1;
+        p++;
+    }
+    return 0;
+}
+
+static void glob_scan_directory(cs_vm* vm, const char* path, const char* pattern, cs_value result, int depth, int max_depth) {
+    if (depth > max_depth) return;
+    
+    DIR* dir = opendir(path);
+    if (!dir) return;
+    
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != NULL) {
+        const char* name = ent->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        
+        char* full_path = path_join_alloc(path, name);
+        if (!full_path) continue;
+        
+        struct stat st;
+        if (stat(full_path, &st) != 0) {
+            free(full_path);
+            continue;
+        }
+        
+        // Match the pattern against the filename
+        if (glob_match_simple(pattern, name)) {
+            cs_value sv = cs_str(vm, full_path);
+            if (sv.type == CS_T_STR) {
+                cs_list_push(result, sv);
+                cs_value_release(sv);
+            }
+        }
+        
+        // Recursively scan subdirectories if we haven't hit max depth
+        if (S_ISDIR(st.st_mode) && depth < max_depth) {
+            glob_scan_directory(vm, full_path, pattern, result, depth + 1, max_depth);
+        }
+        
+        free(full_path);
+    }
+    closedir(dir);
+}
+
+static int nf_glob(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 1 || argc > 2 || argv[0].type != CS_T_STR) {
+        *out = cs_nil();
+        return 0;
+    }
+    
+    const char* pattern = cs_to_cstr(argv[0]);
+    const char* base_path = ".";
+    
+    if (argc == 2 && argv[1].type == CS_T_STR) {
+        base_path = cs_to_cstr(argv[1]);
+    }
+    
+    char* resolved_base = resolve_path_alloc(vm, base_path);
+    if (!resolved_base) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    cs_value listv = cs_list(vm);
+    if (listv.type != CS_T_LIST) {
+        free(resolved_base);
+        *out = cs_nil();
+        return 0;
+    }
+    
+    // Check if pattern has ** for recursive matching
+    int is_recursive = glob_has_double_star(pattern);
+    int max_depth = is_recursive ? 100 : 0;
+    
+    // Remove ** from pattern for matching
+    char* clean_pattern = cs_strdup2_local(pattern);
+    if (!clean_pattern) {
+        free(resolved_base);
+        cs_value_release(listv);
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    // Replace **/  with empty string (for patterns like **/*.txt)
+    char* p = clean_pattern;
+    while (*p) {
+        if (p[0] == '*' && p[1] == '*' && p[2] == '/') {
+            // Remove **/ entirely
+            memmove(p, p + 3, strlen(p + 3) + 1);
+        } else if (p[0] == '*' && p[1] == '*') {
+            // Just ** without / - replace with *
+            p[0] = '*';
+            memmove(p + 1, p + 2, strlen(p + 2) + 1);
+        } else {
+            p++;
+        }
+    }
+    
+    glob_scan_directory(vm, resolved_base, clean_pattern, listv, 0, max_depth);
+    
+    free(clean_pattern);
+    free(resolved_base);
+    *out = listv;
+    return 0;
+}
+
+// ---------- File Watching with inotify ----------
+
+#define MAX_WATCHES 256
+#define INOTIFY_EVENT_SIZE (sizeof(struct inotify_event))
+#define INOTIFY_BUF_LEN (1024 * (INOTIFY_EVENT_SIZE + 16))
+
+typedef struct {
+    int handle_id;
+    int inotify_fd;
+    int watch_fd;
+    char* path;
+    cs_value callback;
+    int is_directory;
+    int recursive;
+} file_watch;
+
+static file_watch* watches[MAX_WATCHES];
+static int next_watch_handle = 1;
+static int inotify_global_fd = -1;
+
+static void init_inotify() {
+    if (inotify_global_fd < 0) {
+        inotify_global_fd = inotify_init1(IN_NONBLOCK);
+    }
+}
+
+static int find_watch_by_handle(int handle) {
+    for (int i = 0; i < MAX_WATCHES; i++) {
+        if (watches[i] && watches[i]->handle_id == handle) return i;
+    }
+    return -1;
+}
+
+static void cleanup_watch(int idx) {
+    if (idx < 0 || idx >= MAX_WATCHES || !watches[idx]) return;
+    
+    file_watch* w = watches[idx];
+    if (w->watch_fd >= 0 && inotify_global_fd >= 0) {
+        inotify_rm_watch(inotify_global_fd, w->watch_fd);
+    }
+    free(w->path);
+    cs_value_release(w->callback);
+    free(w);
+    watches[idx] = NULL;
+}
+
+static const char* inotify_event_type(uint32_t mask) {
+    if (mask & IN_CREATE) return "created";
+    if (mask & IN_MODIFY) return "modified";
+    if (mask & IN_DELETE) return "deleted";
+    if (mask & IN_MOVED_FROM || mask & IN_MOVED_TO) return "renamed";
+    return "changed";
+}
+
+static void process_inotify_events(cs_vm* vm) {
+    if (inotify_global_fd < 0) return;
+    
+    char buffer[INOTIFY_BUF_LEN];
+    ssize_t len = read(inotify_global_fd, buffer, INOTIFY_BUF_LEN);
+    if (len < 0) return;
+    
+    int i = 0;
+    while (i < len) {
+        struct inotify_event* event = (struct inotify_event*)&buffer[i];
+        
+        // Find the watch that corresponds to this event
+        for (int w = 0; w < MAX_WATCHES; w++) {
+            if (watches[w] && watches[w]->watch_fd == event->wd) {
+                file_watch* watch = watches[w];
+                
+                // Build full path
+                char* event_path = watch->path;
+                if (event->len > 0) {
+                    event_path = path_join_alloc(watch->path, event->name);
+                }
+                
+                // Call the callback
+                cs_value event_type = cs_str(vm, inotify_event_type(event->mask));
+                cs_value path_val = cs_str(vm, event_path);
+                
+                cs_value args[2] = {event_type, path_val};
+                cs_value result = cs_nil();
+                cs_call_value(vm, watch->callback, 2, args, &result);
+                
+                cs_value_release(event_type);
+                cs_value_release(path_val);
+                cs_value_release(result);
+                
+                if (event->len > 0 && event_path != watch->path) {
+                    free(event_path);
+                }
+                break;
+            }
+        }
+        
+        i += INOTIFY_EVENT_SIZE + event->len;
+    }
+}
+
+static int nf_watch_file(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || (argv[1].type != CS_T_FUNC && argv[1].type != CS_T_NATIVE)) {
+        *out = cs_int(-1);
+        return 0;
+    }
+    
+    init_inotify();
+    if (inotify_global_fd < 0) {
+        cs_error(vm, "failed to initialize inotify");
+        return 1;
+    }
+    
+    const char* path = cs_to_cstr(argv[0]);
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    // Find free slot
+    int slot = -1;
+    for (int i = 0; i < MAX_WATCHES; i++) {
+        if (!watches[i]) {
+            slot = i;
+            break;
+        }
+    }
+    
+    if (slot < 0) {
+        free(resolved);
+        cs_error(vm, "too many watches");
+        return 1;
+    }
+    
+    int wd = inotify_add_watch(inotify_global_fd, resolved, 
+                               IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVE);
+    if (wd < 0) {
+        free(resolved);
+        cs_error(vm, "failed to add watch");
+        return 1;
+    }
+    
+    file_watch* w = (file_watch*)malloc(sizeof(file_watch));
+    if (!w) {
+        inotify_rm_watch(inotify_global_fd, wd);
+        free(resolved);
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    w->handle_id = next_watch_handle++;
+    w->inotify_fd = inotify_global_fd;
+    w->watch_fd = wd;
+    w->path = resolved;
+    w->callback = cs_value_copy(argv[1]);
+    w->is_directory = 0;
+    w->recursive = 0;
+    
+    watches[slot] = w;
+    *out = cs_int(w->handle_id);
+    return 0;
+}
+
+static int nf_watch_dir(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 2 || argc > 3 || argv[0].type != CS_T_STR || (argv[1].type != CS_T_FUNC && argv[1].type != CS_T_NATIVE)) {
+        *out = cs_int(-1);
+        return 0;
+    }
+    
+    int recursive = 0;
+    if (argc == 3 && argv[2].type == CS_T_BOOL) {
+        recursive = argv[2].as.b;
+    }
+    
+    init_inotify();
+    if (inotify_global_fd < 0) {
+        cs_error(vm, "failed to initialize inotify");
+        return 1;
+    }
+    
+    const char* path = cs_to_cstr(argv[0]);
+    char* resolved = resolve_path_alloc(vm, path);
+    if (!resolved) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    // Find free slot
+    int slot = -1;
+    for (int i = 0; i < MAX_WATCHES; i++) {
+        if (!watches[i]) {
+            slot = i;
+            break;
+        }
+    }
+    
+    if (slot < 0) {
+        free(resolved);
+        cs_error(vm, "too many watches");
+        return 1;
+    }
+    
+    uint32_t mask = IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVE;
+    if (recursive) mask |= IN_CREATE; // Watch for new subdirectories
+    
+    int wd = inotify_add_watch(inotify_global_fd, resolved, mask);
+    if (wd < 0) {
+        free(resolved);
+        cs_error(vm, "failed to add watch");
+        return 1;
+    }
+    
+    file_watch* w = (file_watch*)malloc(sizeof(file_watch));
+    if (!w) {
+        inotify_rm_watch(inotify_global_fd, wd);
+        free(resolved);
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    w->handle_id = next_watch_handle++;
+    w->inotify_fd = inotify_global_fd;
+    w->watch_fd = wd;
+    w->path = resolved;
+    w->callback = cs_value_copy(argv[1]);
+    w->is_directory = 1;
+    w->recursive = recursive;
+    
+    watches[slot] = w;
+    *out = cs_int(w->handle_id);
+    return 0;
+}
+
+static int nf_unwatch(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm;
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_INT) {
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    int handle = (int)argv[0].as.i;
+    int idx = find_watch_by_handle(handle);
+    if (idx < 0) {
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    cleanup_watch(idx);
+    *out = cs_bool(1);
+    return 0;
+}
+
+static int nf_process_file_watches(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    (void)argc;
+    (void)argv;
+    if (!out) return 0;
+    
+    process_inotify_events(vm);
+    *out = cs_nil();
+    return 0;
+}
+
+// ---------- Temp Files ----------
+
+#define MAX_TEMP_FILES 512
+static char* temp_files[MAX_TEMP_FILES];
+static int temp_file_count = 0;
+static int temp_cleanup_registered = 0;
+
+static void cleanup_temp_files() {
+    for (int i = 0; i < temp_file_count; i++) {
+        if (temp_files[i]) {
+            remove(temp_files[i]);
+            rmdir(temp_files[i]); // Try both
+            free(temp_files[i]);
+            temp_files[i] = NULL;
+        }
+    }
+}
+
+static void register_temp_cleanup(const char* path) {
+    if (!temp_cleanup_registered) {
+        atexit(cleanup_temp_files);
+        temp_cleanup_registered = 1;
+    }
+    
+    if (temp_file_count < MAX_TEMP_FILES) {
+        temp_files[temp_file_count++] = cs_strdup2_local(path);
+    }
+}
+
+static char* create_temp_path(const char* prefix, const char* suffix, int is_dir) {
+    const char* tmp_dir = getenv("TMPDIR");
+    if (!tmp_dir) tmp_dir = "/tmp";
+    
+    char template[1024];
+    // Template must end with XXXXXX for mkstemp/mkdtemp
+    snprintf(template, sizeof(template), "%s/%sXXXXXX", 
+             tmp_dir, prefix ? prefix : "cs_");
+    
+    char* path = cs_strdup2_local(template);
+    if (!path) return NULL;
+    
+    if (is_dir) {
+        if (mkdtemp(path) == NULL) {
+            free(path);
+            return NULL;
+        }
+    } else {
+        // Create temp file with mkstemp
+        int fd = mkstemp(path);
+        if (fd < 0) {
+            free(path);
+            return NULL;
+        }
+        close(fd);
+        
+        // If suffix requested, rename the file to add suffix
+        if (suffix && suffix[0]) {
+            size_t path_len = strlen(path);
+            size_t suffix_len = strlen(suffix);
+            char* new_path = (char*)malloc(path_len + suffix_len + 1);
+            if (new_path) {
+                memcpy(new_path, path, path_len);
+                memcpy(new_path + path_len, suffix, suffix_len + 1);
+                if (rename(path, new_path) == 0) {
+                    free(path);
+                    path = new_path;
+                } else {
+                    // Rename failed, keep original path
+                    free(new_path);
+                }
+            }
+        }
+    }
+    
+    register_temp_cleanup(path);
+    return path;
+}
+
+static int nf_temp_file(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    
+    const char* prefix = NULL;
+    const char* suffix = NULL;
+    
+    if (argc >= 1 && argv[0].type == CS_T_STR) {
+        prefix = cs_to_cstr(argv[0]);
+    }
+    if (argc >= 2 && argv[1].type == CS_T_STR) {
+        suffix = cs_to_cstr(argv[1]);
+    }
+    
+    char* path = create_temp_path(prefix, suffix, 0);
+    if (!path) {
+        cs_error(vm, "failed to create temp file");
+        return 1;
+    }
+    
+    cs_value result = cs_str(vm, path);
+    free(path);
+    
+    *out = result;
+    return 0;
+}
+
+static int nf_temp_dir(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    
+    const char* prefix = NULL;
+    if (argc >= 1 && argv[0].type == CS_T_STR) {
+        prefix = cs_to_cstr(argv[0]);
+    }
+    
+    char* path = create_temp_path(prefix, NULL, 1);
+    if (!path) {
+        cs_error(vm, "failed to create temp directory");
+        return 1;
+    }
+    
+    cs_value result = cs_str(vm, path);
+    free(path);
+    
+    *out = result;
+    return 0;
+}
+
+// ---------- Archive Operations ----------
+
+// Zip using miniz (we'll use zlib for gzip and implement tar manually)
+
+static int nf_gzip_compress(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) {
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    const char* input_path = cs_to_cstr(argv[0]);
+    const char* output_path = cs_to_cstr(argv[1]);
+    
+    char* resolved_in = resolve_path_alloc(vm, input_path);
+    char* resolved_out = resolve_path_alloc(vm, output_path);
+    if (!resolved_in || !resolved_out) {
+        free(resolved_in);
+        free(resolved_out);
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    FILE* in = fopen(resolved_in, "rb");
+    if (!in) {
+        free(resolved_in);
+        free(resolved_out);
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    gzFile out_gz = gzopen(resolved_out, "wb");
+    if (!out_gz) {
+        fclose(in);
+        free(resolved_in);
+        free(resolved_out);
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    char buffer[8192];
+    size_t bytes_read;
+    int success = 1;
+    
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), in)) > 0) {
+        if (gzwrite(out_gz, buffer, (unsigned)bytes_read) != (int)bytes_read) {
+            success = 0;
+            break;
+        }
+    }
+    
+    fclose(in);
+    gzclose(out_gz);
+    free(resolved_in);
+    free(resolved_out);
+    
+    *out = cs_bool(success);
+    return 0;
+}
+
+static int nf_gzip_decompress(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) {
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    const char* input_path = cs_to_cstr(argv[0]);
+    const char* output_path = cs_to_cstr(argv[1]);
+    
+    char* resolved_in = resolve_path_alloc(vm, input_path);
+    char* resolved_out = resolve_path_alloc(vm, output_path);
+    if (!resolved_in || !resolved_out) {
+        free(resolved_in);
+        free(resolved_out);
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    gzFile in_gz = gzopen(resolved_in, "rb");
+    if (!in_gz) {
+        free(resolved_in);
+        free(resolved_out);
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    FILE* out_file = fopen(resolved_out, "wb");
+    if (!out_file) {
+        gzclose(in_gz);
+        free(resolved_in);
+        free(resolved_out);
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    char buffer[8192];
+    int bytes_read;
+    int success = 1;
+    
+    while ((bytes_read = gzread(in_gz, buffer, sizeof(buffer))) > 0) {
+        if (fwrite(buffer, 1, bytes_read, out_file) != (size_t)bytes_read) {
+            success = 0;
+            break;
+        }
+    }
+    
+    gzclose(in_gz);
+    fclose(out_file);
+    free(resolved_in);
+    free(resolved_out);
+    
+    *out = cs_bool(success);
+    return 0;
+}
+
+// Simple TAR implementation (POSIX tar format)
+#define TAR_BLOCK_SIZE 512
+#define TAR_NAME_SIZE 100
+#define TAR_MODE_SIZE 8
+#define TAR_UID_SIZE 8
+#define TAR_GID_SIZE 8
+#define TAR_SIZE_SIZE 12
+#define TAR_MTIME_SIZE 12
+#define TAR_CHKSUM_SIZE 8
+#define TAR_TYPEFLAG_SIZE 1
+#define TAR_LINKNAME_SIZE 100
+#define TAR_MAGIC_SIZE 6
+#define TAR_VERSION_SIZE 2
+#define TAR_UNAME_SIZE 32
+#define TAR_GNAME_SIZE 32
+#define TAR_DEVMAJOR_SIZE 8
+#define TAR_DEVMINOR_SIZE 8
+#define TAR_PREFIX_SIZE 155
+
+typedef struct {
+    char name[TAR_NAME_SIZE];
+    char mode[TAR_MODE_SIZE];
+    char uid[TAR_UID_SIZE];
+    char gid[TAR_GID_SIZE];
+    char size[TAR_SIZE_SIZE];
+    char mtime[TAR_MTIME_SIZE];
+    char chksum[TAR_CHKSUM_SIZE];
+    char typeflag[TAR_TYPEFLAG_SIZE];
+    char linkname[TAR_LINKNAME_SIZE];
+    char magic[TAR_MAGIC_SIZE];
+    char version[TAR_VERSION_SIZE];
+    char uname[TAR_UNAME_SIZE];
+    char gname[TAR_GNAME_SIZE];
+    char devmajor[TAR_DEVMAJOR_SIZE];
+    char devminor[TAR_DEVMINOR_SIZE];
+    char prefix[TAR_PREFIX_SIZE];
+    char padding[12];
+} tar_header;
+
+static void tar_format_octal(char* dest, size_t size, uint64_t value) {
+    // Format as octal, null-terminated, filling the field
+    // TAR format uses null or space padding
+    if (size == 0) return;
+    int len = snprintf(dest, size, "%0*lo", (int)(size - 1), (unsigned long)value);
+    if (len < 0 || (size_t)len >= size) {
+        // Truncated - just zero-fill as fallback
+        memset(dest, '0', size - 1);
+        dest[size - 1] = '\0';
+    }
+}
+
+static uint64_t tar_parse_octal(const char* str, size_t size) {
+    char buf[256];
+    size_t len = size < sizeof(buf) ? size : sizeof(buf) - 1;
+    memcpy(buf, str, len);
+    buf[len] = 0;
+    return (uint64_t)strtoul(buf, NULL, 8);
+}
+
+static void tar_calculate_checksum(tar_header* header) {
+    memset(header->chksum, ' ', TAR_CHKSUM_SIZE);
+    unsigned int checksum = 0;
+    unsigned char* p = (unsigned char*)header;
+    for (int i = 0; i < TAR_BLOCK_SIZE; i++) {
+        checksum += p[i];
+    }
+    tar_format_octal(header->chksum, TAR_CHKSUM_SIZE, checksum);
+}
+
+static int tar_add_file(FILE* tar, const char* filename, const char* arcname) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) return 0;
+    
+    // Get file stats
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0) {
+        fclose(f);
+        return 0;
+    }
+    
+    // Create header
+    tar_header header;
+    memset(&header, 0, sizeof(header));
+    
+    strncpy(header.name, arcname, TAR_NAME_SIZE - 1);
+    tar_format_octal(header.mode, TAR_MODE_SIZE, st.st_mode & 0777);
+    tar_format_octal(header.uid, TAR_UID_SIZE, st.st_uid);
+    tar_format_octal(header.gid, TAR_GID_SIZE, st.st_gid);
+    tar_format_octal(header.size, TAR_SIZE_SIZE, st.st_size);
+    tar_format_octal(header.mtime, TAR_MTIME_SIZE, st.st_mtime);
+    header.typeflag[0] = '0'; // Regular file
+    memcpy(header.magic, "ustar", 5);
+    memcpy(header.version, "00", 2);
+    
+    tar_calculate_checksum(&header);
+    
+    // Write header
+    if (fwrite(&header, TAR_BLOCK_SIZE, 1, tar) != 1) {
+        fclose(f);
+        return 0;
+    }
+    
+    // Write file content
+    char buffer[TAR_BLOCK_SIZE];
+    size_t bytes_read;
+    while ((bytes_read = fread(buffer, 1, TAR_BLOCK_SIZE, f)) > 0) {
+        if (bytes_read < TAR_BLOCK_SIZE) {
+            memset(buffer + bytes_read, 0, TAR_BLOCK_SIZE - bytes_read);
+        }
+        if (fwrite(buffer, TAR_BLOCK_SIZE, 1, tar) != 1) {
+            fclose(f);
+            return 0;
+        }
+    }
+    
+    fclose(f);
+    return 1;
+}
+
+static int nf_tar_create(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc < 2 || argc > 3 || argv[0].type != CS_T_STR || argv[1].type != CS_T_LIST) {
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    const char* archive_path = cs_to_cstr(argv[0]);
+    cs_list_obj* files = (cs_list_obj*)argv[1].as.p;
+    const char* compress = NULL;
+    
+    if (argc == 3 && argv[2].type == CS_T_STR) {
+        compress = cs_to_cstr(argv[2]);
+    }
+    
+    char* resolved = resolve_path_alloc(vm, archive_path);
+    if (!resolved) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    // Determine output file (use temp file if gzip compression)
+    char* tar_path = resolved;
+    char temp_tar[1024];
+    if (compress && strcmp(compress, "gzip") == 0) {
+        snprintf(temp_tar, sizeof(temp_tar), "%s.tmp", resolved);
+        tar_path = temp_tar;
+    }
+    
+    FILE* tar = fopen(tar_path, "wb");
+    if (!tar) {
+        free(resolved);
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    int success = 1;
+    for (size_t i = 0; i < files->len; i++) {
+        cs_value v = files->items[i];
+        if (v.type != CS_T_STR) continue;
+        
+        const char* file = cs_to_cstr(v);
+        char* file_resolved = resolve_path_alloc(vm, file);
+        if (!file_resolved) continue;
+        
+        // Use basename as archive name
+        const char* arcname = strrchr(file, '/');
+        if (!arcname) arcname = strrchr(file, '\\');
+        arcname = arcname ? arcname + 1 : file;
+        
+        if (!tar_add_file(tar, file_resolved, arcname)) {
+            success = 0;
+        }
+        
+        free(file_resolved);
+    }
+    
+    // Write two empty blocks to mark end of archive
+    char empty[TAR_BLOCK_SIZE];
+    memset(empty, 0, TAR_BLOCK_SIZE);
+    fwrite(empty, TAR_BLOCK_SIZE, 1, tar);
+    fwrite(empty, TAR_BLOCK_SIZE, 1, tar);
+    
+    fclose(tar);
+    
+    // Compress if needed
+    if (success && compress && strcmp(compress, "gzip") == 0) {
+        gzFile gz = gzopen(resolved, "wb");
+        if (gz) {
+            FILE* in = fopen(tar_path, "rb");
+            if (in) {
+                char buffer[8192];
+                size_t bytes;
+                while ((bytes = fread(buffer, 1, sizeof(buffer), in)) > 0) {
+                    gzwrite(gz, buffer, (unsigned)bytes);
+                }
+                fclose(in);
+            }
+            gzclose(gz);
+            remove(tar_path);
+        } else {
+            success = 0;
+        }
+    }
+    
+    free(resolved);
+    *out = cs_bool(success);
+    return 0;
+}
+
+static int nf_tar_list(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_STR) {
+        *out = cs_nil();
+        return 0;
+    }
+    
+    const char* archive_path = cs_to_cstr(argv[0]);
+    char* resolved = resolve_path_alloc(vm, archive_path);
+    if (!resolved) {
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    // Check if gzipped
+    int is_gzipped = 0;
+    const char* ext = strrchr(archive_path, '.');
+    if (ext && strcmp(ext, ".gz") == 0) {
+        is_gzipped = 1;
+    }
+    
+    FILE* tar = NULL;
+    gzFile gz = NULL;
+    char temp_tar[1024];
+    
+    if (is_gzipped) {
+        // Decompress to temp file
+        snprintf(temp_tar, sizeof(temp_tar), "/tmp/cs_tar_XXXXXX");
+        int fd = mkstemp(temp_tar);
+        if (fd < 0) {
+            free(resolved);
+            *out = cs_nil();
+            return 0;
+        }
+        close(fd);
+        
+        gz = gzopen(resolved, "rb");
+        tar = fopen(temp_tar, "wb");
+        if (gz && tar) {
+            char buffer[8192];
+            int bytes;
+            while ((bytes = gzread(gz, buffer, sizeof(buffer))) > 0) {
+                fwrite(buffer, 1, bytes, tar);
+            }
+            fclose(tar);
+            gzclose(gz);
+            tar = fopen(temp_tar, "rb");
+        }
+    } else {
+        tar = fopen(resolved, "rb");
+    }
+    
+    if (!tar) {
+        free(resolved);
+        if (is_gzipped) remove(temp_tar);
+        *out = cs_nil();
+        return 0;
+    }
+    
+    cs_value listv = cs_list(vm);
+    if (listv.type != CS_T_LIST) {
+        fclose(tar);
+        free(resolved);
+        if (is_gzipped) remove(temp_tar);
+        *out = cs_nil();
+        return 0;
+    }
+    
+    tar_header header;
+    while (fread(&header, TAR_BLOCK_SIZE, 1, tar) == 1) {
+        // Check for end of archive
+        if (header.name[0] == '\0') break;
+        
+        // Get file name
+        cs_value sv = cs_str(vm, header.name);
+        if (sv.type == CS_T_STR) {
+            cs_list_push(listv, sv);
+            cs_value_release(sv);
+        }
+        
+        // Skip file content
+        uint64_t size = tar_parse_octal(header.size, TAR_SIZE_SIZE);
+        uint64_t blocks = (size + TAR_BLOCK_SIZE - 1) / TAR_BLOCK_SIZE;
+        fseek(tar, blocks * TAR_BLOCK_SIZE, SEEK_CUR);
+    }
+    
+    fclose(tar);
+    free(resolved);
+    if (is_gzipped) remove(temp_tar);
+    
+    *out = listv;
+    return 0;
+}
+
+static int nf_tar_extract(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || argv[0].type != CS_T_STR || argv[1].type != CS_T_STR) {
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    const char* archive_path = cs_to_cstr(argv[0]);
+    const char* dest_path = cs_to_cstr(argv[1]);
+    
+    char* resolved_arc = resolve_path_alloc(vm, archive_path);
+    char* resolved_dest = resolve_path_alloc(vm, dest_path);
+    if (!resolved_arc || !resolved_dest) {
+        free(resolved_arc);
+        free(resolved_dest);
+        cs_error(vm, "out of memory");
+        return 1;
+    }
+    
+    // Create destination directory if needed
+    mkdir(resolved_dest, 0777);
+    
+    // Check if gzipped
+    int is_gzipped = 0;
+    const char* ext = strrchr(archive_path, '.');
+    if (ext && strcmp(ext, ".gz") == 0) {
+        is_gzipped = 1;
+    }
+    
+    FILE* tar = NULL;
+    char temp_tar[1024];
+    
+    if (is_gzipped) {
+        // Decompress to temp file
+        snprintf(temp_tar, sizeof(temp_tar), "/tmp/cs_tar_XXXXXX");
+        int fd = mkstemp(temp_tar);
+        if (fd < 0) {
+            free(resolved_arc);
+            free(resolved_dest);
+            *out = cs_bool(0);
+            return 0;
+        }
+        close(fd);
+        
+        gzFile gz = gzopen(resolved_arc, "rb");
+        tar = fopen(temp_tar, "wb");
+        if (gz && tar) {
+            char buffer[8192];
+            int bytes;
+            while ((bytes = gzread(gz, buffer, sizeof(buffer))) > 0) {
+                fwrite(buffer, 1, bytes, tar);
+            }
+            fclose(tar);
+            gzclose(gz);
+            tar = fopen(temp_tar, "rb");
+        }
+    } else {
+        tar = fopen(resolved_arc, "rb");
+    }
+    
+    if (!tar) {
+        free(resolved_arc);
+        free(resolved_dest);
+        if (is_gzipped) remove(temp_tar);
+        *out = cs_bool(0);
+        return 0;
+    }
+    
+    int success = 1;
+    tar_header header;
+    while (fread(&header, TAR_BLOCK_SIZE, 1, tar) == 1) {
+        if (header.name[0] == '\0') break;
+        
+        char* out_path = path_join_alloc(resolved_dest, header.name);
+        if (!out_path) {
+            success = 0;
+            break;
+        }
+        
+        uint64_t size = tar_parse_octal(header.size, TAR_SIZE_SIZE);
+        
+        // Extract regular file
+        if (header.typeflag[0] == '0' || header.typeflag[0] == '\0') {
+            FILE* f = fopen(out_path, "wb");
+            if (f) {
+                uint64_t remaining = size;
+                char buffer[TAR_BLOCK_SIZE];
+                while (remaining > 0) {
+                    size_t to_read = remaining > TAR_BLOCK_SIZE ? TAR_BLOCK_SIZE : (size_t)remaining;
+                    if (fread(buffer, 1, TAR_BLOCK_SIZE, tar) != TAR_BLOCK_SIZE) {
+                        success = 0;
+                        break;
+                    }
+                    fwrite(buffer, 1, to_read, f);
+                    remaining -= to_read;
+                }
+                fclose(f);
+            } else {
+                success = 0;
+                // Skip blocks
+                uint64_t blocks = (size + TAR_BLOCK_SIZE - 1) / TAR_BLOCK_SIZE;
+                fseek(tar, blocks * TAR_BLOCK_SIZE, SEEK_CUR);
+            }
+        } else {
+            // Skip non-regular files
+            uint64_t blocks = (size + TAR_BLOCK_SIZE - 1) / TAR_BLOCK_SIZE;
+            fseek(tar, blocks * TAR_BLOCK_SIZE, SEEK_CUR);
+        }
+        
+        free(out_path);
+    }
+    
+    fclose(tar);
+    free(resolved_arc);
+    free(resolved_dest);
+    if (is_gzipped) remove(temp_tar);
+    
+    *out = cs_bool(success);
+    return 0;
+}
+
+#endif // __linux__
 
 // ---------- JSON helpers ----------
 typedef struct {
@@ -7238,6 +8314,23 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "cwd",        nf_cwd,        NULL);
     cs_register_native(vm, "chdir",      nf_chdir,      NULL);
     cs_register_native(vm, "fmt",         nf_fmt,         NULL);
+
+#if defined(__linux__)
+    // Advanced file handling
+    cs_register_native(vm, "glob",              nf_glob,              NULL);
+    cs_register_native(vm, "watch_file",        nf_watch_file,        NULL);
+    cs_register_native(vm, "watch_dir",         nf_watch_dir,         NULL);
+    cs_register_native(vm, "unwatch",           nf_unwatch,           NULL);
+    cs_register_native(vm, "process_file_watches", nf_process_file_watches, NULL);
+    cs_register_native(vm, "temp_file",         nf_temp_file,         NULL);
+    cs_register_native(vm, "temp_dir",          nf_temp_dir,          NULL);
+    cs_register_native(vm, "gzip_compress",     nf_gzip_compress,     NULL);
+    cs_register_native(vm, "gzip_decompress",   nf_gzip_decompress,   NULL);
+    cs_register_native(vm, "tar_create",        nf_tar_create,        NULL);
+    cs_register_native(vm, "tar_list",          nf_tar_list,          NULL);
+    cs_register_native(vm, "tar_extract",       nf_tar_extract,       NULL);
+#endif
+    
     cs_register_native(vm, "now_ms",      nf_now_ms,      NULL);
     cs_register_native(vm, "unix_ms",     nf_unix_ms,     NULL);
     cs_register_native(vm, "unix_s",      nf_unix_s,      NULL);

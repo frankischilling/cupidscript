@@ -17,6 +17,7 @@
 - [Path Ops](#path-ops)
 - [Date / Time](#date--time)
 - [Filesystem](#filesystem)
+- [Advanced File Operations](#advanced-file-operations-linux-only)
 - [Formatting](#formatting)
 - [JSON](#json)
 - [Data Format Functions](#data-format-functions)
@@ -708,6 +709,154 @@ Returns the VM's current working directory (used for resolving relative paths).
 ### `chdir(path: string) -> bool`
 
 Sets the VM's current working directory for future relative paths. Returns `true` on success.
+
+## Advanced File Operations (Linux only)
+
+> **Note:** These features are available on Linux only. See [File-Handling](File-Handling.md) for detailed documentation and examples.
+
+### Glob Patterns
+
+#### `glob(pattern: string, path?: string) -> list`
+
+Matches files using glob patterns with wildcards.
+
+Supported patterns:
+* `*` - Match any characters except `/`
+* `?` - Match single character
+* `**` - Match recursively
+* `[abc]` - Match any char in set
+* `{a,b,c}` - Match any alternative
+
+Example:
+```cs
+// Find all text files
+let txt_files = glob("*.txt");
+
+// Find all CupidScript files recursively
+let cs_files = glob("**/*.cs", "src");
+
+// Find test files
+let tests = glob("test_*.cs", "tests");
+```
+
+### File Watching
+
+Monitor files and directories for changes using inotify.
+
+#### `watch_file(path: string, callback: function) -> int`
+
+Watch a file for changes. Returns watch handle.
+
+Callback signature: `fn(event_type: string, path: string)`
+
+Event types: `"created"`, `"modified"`, `"deleted"`, `"renamed"`
+
+#### `watch_dir(path: string, callback: function, recursive?: bool) -> int`
+
+Watch a directory for changes. Returns watch handle.
+
+Set `recursive` to `true` to watch subdirectories.
+
+#### `unwatch(handle: int) -> bool`
+
+Stop watching a file or directory. Returns `true` on success.
+
+#### `process_file_watches() -> nil`
+
+Process pending file system events. Call this periodically to trigger callbacks.
+
+Example:
+```cs
+// Watch configuration file
+let handle = watch_file("config.yaml", fn(event, path) {
+    print("Config changed:", event);
+});
+
+// Main loop
+while running {
+    process_file_watches();
+    sleep(100);
+}
+
+unwatch(handle);
+```
+
+### Temporary Files
+
+Create temporary files and directories with automatic cleanup on exit.
+
+#### `temp_file(prefix?: string, suffix?: string) -> string`
+
+Create a temporary file. Returns path to file.
+
+Example:
+```cs
+let temp = temp_file("myapp_", ".txt");
+write_file(temp, "temporary data");
+// Automatically cleaned up on exit
+```
+
+#### `temp_dir(prefix?: string) -> string`
+
+Create a temporary directory. Returns path to directory.
+
+Example:
+```cs
+let workspace = temp_dir("build_");
+mkdir(workspace + "/obj");
+write_file(workspace + "/obj/main.o", "...");
+// Entire tree cleaned up on exit
+```
+
+### Archive Operations
+
+Create and extract tar and gzip archives.
+
+#### `gzip_compress(input_path: string, output_path: string) -> bool`
+
+Compress a file using gzip. Returns `true` on success.
+
+#### `gzip_decompress(input_path: string, output_path: string) -> bool`
+
+Decompress a gzip file. Returns `true` on success.
+
+Example:
+```cs
+gzip_compress("large.txt", "large.txt.gz");
+gzip_decompress("large.txt.gz", "restored.txt");
+```
+
+#### `tar_create(archive_path: string, files: list, compress?: string) -> bool`
+
+Create a tar archive from a list of files.
+
+Set `compress` to `"gzip"` to create a `.tar.gz` file.
+
+#### `tar_list(archive_path: string) -> list | nil`
+
+List contents of a tar archive. Returns list of filenames or `nil` on error.
+
+#### `tar_extract(archive_path: string, dest_path: string) -> bool`
+
+Extract a tar archive to a directory. Returns `true` on success.
+
+Example:
+```cs
+// Create tar archive
+let files = ["file1.txt", "file2.txt", "file3.cs"];
+tar_create("backup.tar", files);
+
+// List contents
+let contents = tar_list("backup.tar");
+
+// Extract
+tar_extract("backup.tar", "restored");
+
+// Create compressed archive
+tar_create("backup.tar.gz", files, "gzip");
+```
+
+For comprehensive documentation, examples, and best practices, see [File-Handling](File-Handling.md).
 
 ## Formatting
 
