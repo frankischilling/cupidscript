@@ -2629,18 +2629,26 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
                 return cs_str(vm, s);
             }
 
-            cs_strbuf_obj* b = strbuf_new();
-            if (!b) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+            // Use cached strbuf to avoid repeated allocations
+            cs_strbuf_obj* b = vm->interp_cache;
+            if (!b) {
+                b = strbuf_new();
+                if (!b) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+                vm->interp_cache = b;
+            } else {
+                // Clear cached strbuf for reuse
+                b->len = 0;
+                if (b->data) b->data[0] = 0;
+            }
 
             for (size_t i = 0; i < e->as.str_interp.count; i++) {
                 cs_value v = eval_expr(vm, env, e->as.str_interp.parts[i], ok);
-                if (!*ok) { strbuf_decref(b); return cs_nil(); }
+                if (!*ok) return cs_nil();
 
                 if (v.type == CS_T_STR) {
                     cs_string* s = (cs_string*)v.as.p;
                     if (s && !strbuf_append_bytes(b, s->data, s->len)) {
                         cs_value_release(v);
-                        strbuf_decref(b);
                         vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
                         *ok = 0;
                         return cs_nil();
@@ -2651,7 +2659,6 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
                     size_t n = strlen(s);
                     if (!strbuf_append_bytes(b, s, n)) {
                         cs_value_release(v);
-                        strbuf_decref(b);
                         vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
                         *ok = 0;
                         return cs_nil();
@@ -2661,11 +2668,11 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
             }
 
             char* out = (char*)malloc(b->len + 1);
-            if (!out) { strbuf_decref(b); vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+            if (!out) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
             memcpy(out, b->data, b->len);
             out[b->len] = 0;
             cs_value rv = cs_str_take(vm, out, (uint64_t)b->len);
-            strbuf_decref(b);
+            // Keep b alive in vm->interp_cache for next interpolation
             return rv;
         }
 
@@ -5313,6 +5320,9 @@ void cs_vm_free(cs_vm* vm) {
         cs_track_node* n = vm->tracked;
         vm->tracked = n->next;
         free(n);
+    }
+    if (vm->interp_cache) {
+        strbuf_decref(vm->interp_cache);
     }
     free(vm);
 }

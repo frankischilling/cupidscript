@@ -150,6 +150,9 @@ struct cs_vm {
     uint64_t prof_match_ms;
     uint64_t prof_optchain_ops;
     uint64_t prof_optchain_ms;
+
+    // String interpolation cache (reusable strbuf to reduce allocations)
+    struct cs_strbuf_obj* interp_cache;
 };
 
 void cs_register_stdlib(cs_vm* vm);

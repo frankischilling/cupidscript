@@ -919,31 +919,77 @@ static int nf_str_replace(cs_vm* vm, void* ud, int argc, const cs_value* argv, c
     const char* rep = ((cs_string*)argv[2].as.p)->data;
     if (!*old) { *out = cs_str(vm, s); return 0; }
 
-    size_t sl = strlen(s), ol = strlen(old), rl = strlen(rep);
-    size_t count = 0;
-    for (const char* p = s; (p = strstr(p, old)); p += ol) count++;
-    size_t nl = sl;
-    if (rl >= ol) nl += count * (rl - ol);
-    else nl -= count * (ol - rl);
-    char* buf = (char*)malloc(nl + 1);
+    size_t ol = strlen(old);
+    size_t rl = strlen(rep);
+
+    // Early exit: no-op replacement (old == rep)
+    if (ol == rl && strcmp(old, rep) == 0) {
+        *out = cs_str(vm, s);
+        return 0;
+    }
+
+    // Early exit: pattern not found
+    const char* first_hit = strstr(s, old);
+    if (!first_hit) {
+        *out = cs_str(vm, s);
+        return 0;
+    }
+
+    // Single-pass build with dynamic buffer
+    size_t cap = strlen(s) + 256;  // Start with input size + headroom
+    char* buf = (char*)malloc(cap);
     if (!buf) { cs_error(vm, "out of memory"); return 1; }
 
     size_t w = 0;
     const char* p = s;
+
     while (1) {
         const char* hit = strstr(p, old);
-        if (!hit) break;
-        size_t npre = (size_t)(hit - p);
-        memcpy(buf + w, p, npre);
-        w += npre;
+        if (!hit) {
+            // Copy remaining tail
+            size_t tail_len = strlen(p);
+
+            // Ensure capacity
+            while (w + tail_len >= cap) {
+                cap *= 2;
+                char* new_buf = (char*)realloc(buf, cap);
+                if (!new_buf) {
+                    free(buf);
+                    cs_error(vm, "out of memory");
+                    return 1;
+                }
+                buf = new_buf;
+            }
+
+            memcpy(buf + w, p, tail_len);
+            w += tail_len;
+            break;
+        }
+
+        // Copy part before match
+        size_t pre_len = (size_t)(hit - p);
+
+        // Ensure capacity for pre + replacement
+        while (w + pre_len + rl >= cap) {
+            cap *= 2;
+            char* new_buf = (char*)realloc(buf, cap);
+            if (!new_buf) {
+                free(buf);
+                cs_error(vm, "out of memory");
+                return 1;
+            }
+            buf = new_buf;
+        }
+
+        memcpy(buf + w, p, pre_len);
+        w += pre_len;
         memcpy(buf + w, rep, rl);
         w += rl;
+
         p = hit + ol;
     }
-    size_t tail = strlen(p);
-    memcpy(buf + w, p, tail);
-    w += tail;
-    buf[w] = 0;
+
+    buf[w] = '\0';
     *out = cs_str_take(vm, buf, (uint64_t)w);
     return 0;
 }
@@ -3308,21 +3354,30 @@ static int nf_str_trim(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_v
     (void)ud;
     if (!out) return 0;
     if (argc < 1 || argv[0].type != CS_T_STR) { cs_error(vm, "str_trim() requires a string argument"); return 1; }
-    
-    const char* s = cs_to_cstr(argv[0]);
+
+    cs_string* str_obj = (cs_string*)argv[0].as.p;
+    const char* s = str_obj->data;
+    const char* orig_s = s;
+
     while (*s && isspace((unsigned char)*s)) s++;
-    
+
     const char* end = s + strlen(s);
     while (end > s && isspace((unsigned char)*(end - 1))) end--;
-    
+
     size_t len = (size_t)(end - s);
+
+    // Early exit: if nothing was trimmed, return original string
+    if (s == orig_s && len == str_obj->len) {
+        *out = argv[0];
+        return 0;
+    }
+
     char* trimmed = (char*)malloc(len + 1);
     if (!trimmed) { cs_error(vm, "out of memory"); return 1; }
     memcpy(trimmed, s, len);
     trimmed[len] = '\0';
-    
-    *out = cs_str(vm, trimmed);
-    free(trimmed);
+
+    *out = cs_str_take(vm, trimmed, (uint64_t)len);
     return 0;
 }
 
@@ -3362,19 +3417,20 @@ static int nf_str_lower(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
     (void)ud;
     if (!out) return 0;
     if (argc < 1 || argv[0].type != CS_T_STR) { cs_error(vm, "str_lower() requires a string argument"); return 1; }
-    
-    const char* s = cs_to_cstr(argv[0]);
-    size_t len = strlen(s);
+
+    cs_string* str_obj = (cs_string*)argv[0].as.p;
+    const char* s = str_obj->data;
+    size_t len = str_obj->len;
+
     char* lower = (char*)malloc(len + 1);
     if (!lower) { cs_error(vm, "out of memory"); return 1; }
-    
+
     for (size_t i = 0; i < len; i++) {
         lower[i] = (char)tolower((unsigned char)s[i]);
     }
     lower[len] = '\0';
-    
-    *out = cs_str(vm, lower);
-    free(lower);
+
+    *out = cs_str_take(vm, lower, (uint64_t)len);
     return 0;
 }
 
@@ -3382,19 +3438,20 @@ static int nf_str_upper(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_
     (void)ud;
     if (!out) return 0;
     if (argc < 1 || argv[0].type != CS_T_STR) { cs_error(vm, "str_upper() requires a string argument"); return 1; }
-    
-    const char* s = cs_to_cstr(argv[0]);
-    size_t len = strlen(s);
+
+    cs_string* str_obj = (cs_string*)argv[0].as.p;
+    const char* s = str_obj->data;
+    size_t len = str_obj->len;
+
     char* upper = (char*)malloc(len + 1);
     if (!upper) { cs_error(vm, "out of memory"); return 1; }
-    
+
     for (size_t i = 0; i < len; i++) {
         upper[i] = (char)toupper((unsigned char)s[i]);
     }
     upper[len] = '\0';
-    
-    *out = cs_str(vm, upper);
-    free(upper);
+
+    *out = cs_str_take(vm, upper, (uint64_t)len);
     return 0;
 }
 
