@@ -4,12 +4,22 @@ CupidScript provides a background event loop for true asynchronous execution. Wh
 
 ## Platform Support
 
-| Platform | Support | Notes |
-|----------|---------|-------|
-| Linux | ✅ Full | Background thread with pthread |
-| macOS | ✅ Full | Background thread with pthread |
-| Unix | ✅ Full | Background thread with pthread |
-| Windows | ⚠️ Partial | Functions return false; uses cooperative scheduling |
+| Platform | Support | Implementation | Notes |
+|----------|---------|----------------|-------|
+| Linux | ✅ Full | poll() + pthread | Background thread with poll-based I/O multiplexing |
+| macOS | ✅ Full | poll() + pthread | Background thread with poll-based I/O multiplexing |
+| Unix | ✅ Full | poll() + pthread | Background thread with poll-based I/O multiplexing |
+| Windows | ⚠️ Partial | select() | Uses select() instead of poll(); functions return false for background loop |
+
+**Implementation Details:**
+- **Unix/Linux/macOS**: Uses `poll()` system call for efficient I/O multiplexing
+- **Windows**: Uses `select()` for I/O multiplexing (poll not available)
+- **Background thread**: Only available on POSIX platforms (pthread)
+- **Cooperative fallback**: All platforms support cooperative scheduling without event loop
+
+The event loop is detected at compile time:
+- `CS_USE_POLL` defined on POSIX systems
+- `CS_USE_SELECT` defined on Windows
 
 ## Basic Usage
 

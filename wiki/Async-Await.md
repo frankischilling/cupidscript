@@ -47,6 +47,7 @@ print(await p); // 42
 * `await` blocks until a promise resolves and throws on rejection.
 * Without the event loop, the scheduler runs cooperatively; operations execute one at a time when awaited.
 * With the event loop (Linux/Unix), multiple async operations can progress concurrently in the background.
+* **Network I/O functions** (tcp_connect, socket_send, socket_recv, http_get, etc.) are inherently asynchronous and should be awaited.
 
 ## Background Event Loop
 

@@ -226,47 +226,72 @@ for i in range(10) {
 }
 ```
 
-## List Ops
-
-### `push(list, value)`
-
-### `pop(list) -> value | nil`
-
-### `extend(list, other_list)`
-
-Appends all elements from `other_list` onto `list` (in-place).
-
-### `index_of(list, value) -> int`
-
-Returns the first index of `value`, or `-1` if not found.
-
-### `sort(list, [cmp], [algo])`
-
-Sorts the list in-place.
-
-* Default sort supports numbers, strings, bools, and nil (matching types only).
-* Optional `cmp(a, b)` should return negative/zero/positive like C's comparator.
-* Optional `algo` selects the algorithm: `"insertion"`, `"quick"`, `"merge"`.
-
-Examples:
-
-```c
-sort(xs); // insertion sort (default)
-sort(xs, "quick");
-sort(xs, "merge");
-
-fn desc(a, b) { return b - a; }
-sort(xs, desc, "quick");
-```
-
 ### `enumerate(list) -> list`
 
-Returns a list of `[index, value]` pairs.
+Returns a list of `[index, value]` pairs. Use with destructuring for Pythonic iteration:
+
+```cs
+let items = ["a", "b", "c"]
+
+// Pythonic style with destructuring
+for [idx, val] in enumerate(items) {
+    print("${idx}: ${val}")
+    // Output: 0: a, 1: b, 2: c
+}
+
+// Native two-variable syntax (VALUE FIRST, then INDEX)
+for val, idx in items {
+    print("${idx}: ${val}")
+    // Output: 0: a, 1: b, 2: c
+}
+
+// Manual destructuring
+let pairs = enumerate(items)
+for pair in pairs {
+    let [idx, val] = pair
+    print("${idx}: ${val}")
+}
+```
+
+**Important:** CupidScript's native `for val, idx in list` syntax uses **value-first** order, while `enumerate()` returns **index-first** `[idx, val]` pairs to match Python conventions. Use the appropriate syntax for your use case.
+
+**Examples:**
 
 ```c
-let xs = ["a", "b"];
-print(enumerate(xs)); // [[0, "a"], [1, "b"]]
+let xs = ["a", "b", "c"];
+print(enumerate(xs)); // [[0, "a"], [1, "b"], [2, "c"]]
+
+// Use with destructuring in comprehensions
+let labeled = [to_str(i) + ": " + v for [i, v] in enumerate(xs)];
+// ["0: a", "1: b", "2: c"]
+
+// Create index-to-value map
+let index_map = {i: v for [i, v] in enumerate(xs)};
+// {0: "a", 1: "b", 2: "c"}
+
+// Filter based on index
+let odd_indices = [v for [i, v] in enumerate(xs) if i % 2 != 0];
+// ["b"]
+
+// Native syntax: value comes first
+for val, idx in xs {
+    print("Item ${idx} is ${val}");
+    // Item 0 is a
+    // Item 1 is b
+    // Item 2 is c
+}
 ```
+
+**Iteration Order Summary:**
+| Syntax | Order | Example |
+|--------|-------|---------|
+| `for val, idx in list` | Value, Index | `for x, i in [10, 20]` → x=10,i=0 then x=20,i=1 |
+| `enumerate(list)` | `[Index, Value]` | `enumerate([10, 20])` → `[[0, 10], [1, 20]]` |
+| `for [idx, val] in enumerate(list)` | Index, Value (destructured) | Matches Python's `enumerate()` |
+
+**Best Practice:** 
+- Use native `for val, idx in list` when you primarily need the value
+- Use `enumerate()` with destructuring when porting Python code or when you want explicit index-first ordering
 
 ### `zip(listA, listB) -> list`
 
@@ -1466,9 +1491,11 @@ socket_close(server);
 
 ### TLS/SSL Connections
 
+> **Note:** TLS support requires building without `CS_NO_TLS` flag and linking against OpenSSL/LibreSSL.
+
 ```c
-// Connect with TLS
-let sock = tls_connect("example.com", 443);
+// Connect with TLS (requires TLS support compiled in)
+let sock = await tls_connect("example.com", 443);
 
 // Check if secure
 print(socket_is_secure(sock));  // true
@@ -1479,9 +1506,9 @@ print(info.version);   // "TLSv1.3"
 print(info.cipher);    // "TLS_AES_256_GCM_SHA384"
 
 // Upgrade existing connection (STARTTLS)
-let smtp = tcp_connect("smtp.example.com", 587);
-socket_send(smtp, "STARTTLS\r\n");
-tls_upgrade(smtp);  // Now encrypted
+let smtp = await tcp_connect("smtp.example.com", 587);
+await socket_send(smtp, "STARTTLS\r\n");
+await tls_upgrade(smtp);  // Now encrypted
 
 socket_close(sock);
 ```
@@ -1490,18 +1517,21 @@ socket_close(sock);
 
 ```c
 // HTTP request
-let resp = http_get("http://example.com");
+let resp = await http_get("http://example.com");
 
-// HTTPS request (automatic TLS)
-let resp = http_get("https://api.example.com/data");
+// HTTPS request (automatic TLS, requires TLS support)
+let resp = await http_get("https://api.example.com/data");
 print(resp.status);  // 200
 print(resp.body);
 
 // POST request
-let resp = http_post("https://api.example.com/data", json_stringify({key: "value"}));
+let resp = await http_post("https://api.example.com/data", json_stringify({key: "value"}));
 
-// Full control
-let resp = http_request({
+// DELETE request
+let resp = await http_delete("https://api.example.com/resource/1");
+
+// Full control with http_request
+let resp = await http_request({
   method: "PUT",
   url: "https://api.example.com/users/1",
   headers: {
@@ -1514,6 +1544,8 @@ let resp = http_request({
   verify_ssl: true  // default, set false to skip cert verification
 });
 ```
+
+**Note:** All HTTP functions are asynchronous and return promises. Use `await` to get the response.
 
 ### URL Utilities
 
@@ -1528,5 +1560,12 @@ let url = url_build({scheme: "https", host: "api.example.com", path: "/v1/users"
 ### Configuration
 
 ```c
+// Set default timeout for network operations (in milliseconds)
 net_set_default_timeout(60000);  // 60 second default timeout
 ```
+
+**Platform Notes:**
+- Network I/O uses non-blocking sockets with the event loop
+- On Linux/Unix: Uses `poll()` for multiplexing
+- On Windows: Uses `select()` for multiplexing
+- TLS support is optional and requires OpenSSL/LibreSSL at build time

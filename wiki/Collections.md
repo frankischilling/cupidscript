@@ -26,6 +26,7 @@ Use `...` to expand a list literal:
 ```c
 let a = [1, 2, 3];
 let b = [0, ...a, 4];  // [0, 1, 2, 3, 4]
+let c = [...a, 5, 6];  // [1, 2, 3, 5, 6] - spread can be at first position
 ```
 
 ### Push / Pop
@@ -139,7 +140,8 @@ Use `...` to expand a map literal (later keys override earlier keys):
 
 ```c
 let defaults = {theme: "dark", size: 12};
-let config = {...defaults, size: 14};
+let config = {...defaults, size: 14};     // {theme: "dark", size: 14}
+let merged = {...defaults, ...config};    // spread can be at first position
 ```
 
 ### Set / Get
@@ -163,12 +165,12 @@ let evens = [x for x in range(20) if x % 2 == 0]
 
 // From lists
 let words = ["hello", "world", "cupid"]
-let uppercase = [w.upper() for w in words]
+let uppercase = [upper(w) for w in words]
 // ["HELLO", "WORLD", "CUPID"]
 
-// From maps
+// From maps (note: for k, v in map syntax only works in comprehensions)
 let data = {a: 1, b: 2, c: 3}
-let pairs = [k + ":" + str(v) for k, v in data]
+let pairs = [k + ":" + to_str(v) for k, v in data]
 // ["a:1", "b:2", "c:3"]
 ```
 
@@ -187,9 +189,26 @@ let high_values = {k: v for k, v in numbers if v > 1}
 // {b: 2, c: 3}
 
 // From list to map
+// ⚠️ IMPORTANT: When iterating lists with 'for var1, var2 in list':
+//   - var1 receives the VALUE (element)
+//   - var2 receives the INDEX (position)
+// This is counter-intuitive! For standard (index, value) order, use enumerate():
 let fruits = ["apple", "banana", "cherry"]
-let indexed = {i: fruit for i, fruit in fruits}
+
+// Counter-intuitive order (value, index)
+let indexed = {idx: fruit for fruit, idx in fruits}
 // {0: "apple", 1: "banana", 2: "cherry"}
+
+// RECOMMENDED: Use enumerate() for standard (index, value) order
+let indexed2 = {idx: fruit for [idx, fruit] in enumerate(fruits)}
+// {0: "apple", 1: "banana", 2: "cherry"}
+
+// Map comprehensions support arbitrary key expressions!
+let by_length = {len(fruit): fruit for fruit, idx in fruits}
+// {5: "apple", 6: "cherry"}  (banana overwritten by cherry, both length 6)
+
+let prefixed = {fruit + "_item": idx for fruit, idx in fruits}
+// {apple_item: 0, banana_item: 1, cherry_item: 2}
 ```
 
 ### Nested Comprehensions
@@ -264,6 +283,27 @@ let pairs = items(m); // list of [key, value] lists
 
 ### Map Iteration
 
+**In comprehensions:**
+```c
+let data = {a: 1, b: 2, c: 3}
+let doubled = {k: v * 2 for k, v in data}  // Works in comprehensions
+```
+
+**In regular loops:**
+```c
+let data = {a: 1, b: 2, c: 3}
+
+// WRONG: for k, v in data {...} does NOT work in regular loops
+// RIGHT: Use items() to get key-value pairs
+for pair in items(data) {
+    let k = pair[0]
+    let v = pair[1]
+    print(k, "=", v)
+}
+```
+
+**Key difference:** The `for k, v in map` syntax only works in comprehensions, not in regular `for` loops.
+
 ## Sets
 
 Sets store unique values (based on `==`).
@@ -313,13 +353,19 @@ for v in map_values(m) {
 
 ```c
 let xs = [1, 2, 3];
+
+// enumerate() returns [[index, value], ...] pairs
 print(enumerate(xs)); // [[0,1], [1,2], [2,3]]
+
+// Use in comprehensions with destructuring for clean (index, value) access
+let labeled = [to_str(idx) + ": " + to_str(val) for [idx, val] in enumerate(xs)];
+// ["0: 1", "1: 2", "2: 3"]
 
 print(zip(["a", "b"], [10, 20, 30])); // [["a",10], ["b",20]]
 
 fn is_even(x) { return x % 2 == 0; }
-print(any(xs, is_even)); // true
-print(all(xs, is_even)); // false
+print(any(xs, is_even)); // true (2 is even)
+print(all(xs, is_even)); // false (1 and 3 are odd)
 
 print(filter(xs, is_even)); // [2]
 print(map(xs, fn(x) => x * 2)); // [2, 4, 6]
@@ -386,3 +432,48 @@ m[42]
 If `m` is a map, `m.name` reads `m["name"]`.
 
 If `m` is *not* a map, field access is a runtime error.
+
+### Iterating Lists
+
+```cs
+// Single variable - just values
+for item in [1, 2, 3] {
+    print(item)
+}
+
+// Two variables - value, index
+for val, idx in ["a", "b", "c"] {
+    print("${idx}: ${val}")
+}
+
+// With enumerate() - index, value (matches Python order)
+for [idx, val] in enumerate(["a", "b", "c"]) {
+    print("${idx}: ${val}")
+}
+```
+
+### Iterating Maps
+
+```cs
+let data = {name: "Alice", age: 30}
+
+// Single variable - keys only
+for key in data {
+    print(key)
+}
+
+// Two variables - key, value
+for key, val in data {
+    print("${key} = ${val}")
+}
+
+// Destructuring with items()
+for [k, v] in data.items() {
+    print("${k}: ${v}")
+}
+
+// Just values
+for val in data.values() {
+    print(val)
+}
+```

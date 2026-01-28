@@ -125,6 +125,15 @@ while (i < 5) {
   print("i =", i);
   i = i + 1;
 }
+
+// With walrus operator - cleaner loop patterns
+while (line := read_line()) {
+    print("Line:", line);
+}
+
+while (data := fetch_next()) {
+    process(data);
+}
 ```
 
 ### For-in loops

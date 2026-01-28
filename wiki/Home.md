@@ -43,6 +43,7 @@ print("sum:", add(xs[0], xs[1]));
 * Boolean: `&& || !`
 * Range: `start..end` (exclusive), `start..=end` (inclusive)
 * Ternary: `cond ? then_val : else_val`
+* Walrus: `x := expr` (assigns and returns value)
 * Calls: `f(a, b)`
 * Indexing: `xs[0]`, `m["key"]`
 * Field access: `obj.field` (maps) + dotted global fallback

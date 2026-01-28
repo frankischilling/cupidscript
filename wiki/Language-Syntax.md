@@ -86,7 +86,7 @@ Double-quoted strings:
 "hello"
 "with \n escapes"
 "quote: \""
-"backslash: \\"
+"backslash: \\""
 ```
 
 Raw (backtick) strings:
@@ -204,14 +204,16 @@ let f = fn(x) => { return x + 1; };
 
 ## Spread & Rest
 
-Spread (`...`) expands lists and maps:
+Spread (`...`) expands lists and maps (can appear at any position, including first):
 
 ```c
 let a = [1, 2, 3];
-let b = [0, ...a, 4];
+let b = [0, ...a, 4];       // [0, 1, 2, 3, 4]
+let c = [...a, 5];          // [1, 2, 3, 5] - spread at first position
 
 let defaults = {theme: "dark", size: 12};
-let config = {...defaults, size: 14};
+let config = {...defaults, size: 14};     // {theme: "dark", size: 14}
+let merged = {...defaults, ...config};    // spread at first position
 ```
 
 Rest parameters collect remaining arguments into a list:
@@ -316,6 +318,7 @@ Assignment:
 
 * `=`
 * `+=`, `-=`, `*=`, `/=` (compound assignment, works on variables, fields, and index expressions)
+* `:=` (walrus operator - assigns and returns value in expressions)
 
 Arithmetic:
 
@@ -342,6 +345,62 @@ Range:
 * `..` (exclusive range, e.g., `0..5` → `[0,1,2,3,4]`)
 * `..=` (inclusive range, e.g., `0..=5` → `[0,1,2,3,4,5]`)
 
+### Walrus Operator
+
+The walrus operator (`:=`) assigns a value to a variable and returns that value, allowing assignment within expressions:
+
+```c
+// Assignment in conditionals
+if (x := get_value()) {
+    print("Got value:", x);  // x is available here
+}
+
+// Assignment in while loops
+while (line := read_line()) {
+    process(line);
+}
+
+// Assignment in function arguments
+result := process(data := fetch_data());
+
+// Chain assignments
+print(y := (x := 10) + 5);  // x=10, y=15
+```
+
+The walrus operator is useful for:
+- **Avoiding redundant function calls**: Assign and test in one expression
+- **Cleaner conditionals**: Combine assignment with condition checking
+- **Loop conditions**: Assign and check loop variables simultaneously
+
+Rules:
+* Left side must be a simple identifier (not a field or index expression)
+* Returns the assigned value
+* Can be used anywhere an expression is valid
+* Precedence is lower than most operators but higher than ternary
+
+Example patterns:
+
+```c
+// Read-process-check pattern
+while (data := fetch_next()) {
+    if (result := process(data)) {
+        save(result);
+    }
+}
+
+// Avoid double computation
+if (value := expensive_computation()) {
+    use(value);  // value already computed and stored
+}
+
+// Nested conditions
+if (user := find_user(id)) {
+    if (perms := get_permissions(user)) {
+        check_access(perms);
+    }
+}
+```
+
 ## Precedence (high to low)
 
 1. Primary: literals, identifiers, parenthesized `(expr)`, list literals `[...]`, map literals `{...}`
@@ -356,6 +415,9 @@ Range:
 10. OR: `||`
 11. Nullish: `a ?? b`
 12. Ternary: `cond ? then : else`
+13. Python-style conditional (in comprehensions): `value_if_true if cond else value_if_false`
+
+> **Note:** The Python-style `if-else` syntax (#13) is primarily supported in comprehension expressions. For general use, prefer the traditional ternary operator (#12).
 
 ### Optional chaining
 

@@ -44,6 +44,23 @@ Notes:
 * Parentheses are required: `if ( ... )`
 * `else` block is optional
 
+**Walrus operator pattern:**
+```c
+// Assign and test in one expression
+if (result := compute_value()) {
+    print("Success:", result);
+} else {
+    print("Failed");
+}
+
+// Nested with walrus
+if (user := find_user(id)) {
+    if (token := generate_token(user)) {
+        send_email(user, token);
+    }
+}
+```
+
 ## `while`
 
 Syntax:
@@ -59,6 +76,21 @@ Notes:
 * Parentheses are required: `while ( ... )`
 * Condition is re-evaluated each iteration
 
+**Walrus operator pattern:**
+```c
+// Read lines until EOF
+while (line := read_line()) {
+    process(line);
+}
+
+// Fetch and process data
+while (data := fetch_next()) {
+    if (is_valid(data)) {
+        handle(data);
+    }
+}
+```
+
 ## `for...in`
 
 Syntax:
@@ -73,6 +105,9 @@ Iterates over:
 
 * Lists: iterates over elements
 * Maps: iterates over keys (use `keys(m)`, `values(m)`, or `items(m)`)
+
+**IMPORTANT:** The `for k, v in map` syntax **only works in comprehensions**, NOT in regular `for` loops.
+Use `items(map)` for key-value iteration in regular loops.
 
 Example:
 
@@ -91,11 +126,57 @@ for i in range(2, 8, 2) {
   print(i); // 2, 4, 6
 }
 
+// Map iteration: use items() for key-value pairs
 let m = {"a": 1, "b": 2};
 for pair in items(m) {
   print(pair[0], "=", pair[1]);
 }
+
+// ❌ WRONG: for k, v in m {...} does NOT work in regular loops
+// ✅ RIGHT: Use items() as shown above
+// ✅ ALSO WORKS: for k, v in m {...} in comprehensions only
 ```
+
+### List Iteration with Index
+
+**\u26a0\ufe0f Understanding Variable Order:**
+
+When iterating lists with two variables, the order is **(value, index)** - opposite to most languages!
+
+```c
+let fruits = ["apple", "banana", "cherry"];
+
+// \u26a0\ufe0f Native syntax: (value, index) - COUNTER-INTUITIVE
+for fruit, idx in fruits {
+    print(idx, ":", fruit);
+    // 0 : apple
+    // 1 : banana
+    // 2 : cherry
+}
+```
+
+**RECOMMENDED: Use `enumerate()` for standard (index, value) order:**
+
+```c
+// ✅ enumerate() returns [[index, value], ...] pairs
+// In regular for loops, access pair elements by index
+for pair in enumerate(fruits) {
+    let idx = pair[0];
+    let fruit = pair[1];
+    print(idx, ":", fruit);
+    // 0 : apple
+    // 1 : banana
+    // 2 : cherry
+}
+
+// In comprehensions, you can use destructuring syntax
+let labeled = [to_str(i) + ": " + val for [i, val] in enumerate([10, 20, 30])];
+// ["0: 10", "1: 20", "2: 30"]
+```
+
+> **Note:** Destructuring syntax `for [a, b] in ...` only works in **comprehensions**, not in regular `for` loops.
+
+**Best Practice:** Always use `enumerate()` when you need both index and value for clarity and compatibility with other languages.
 
 ## C-Style `for` Loops
 
