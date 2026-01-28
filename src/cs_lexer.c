@@ -370,7 +370,15 @@ token lex_next(lexer* L) {
                 t = TK_DOT;
             }
             break;
-        case ':': t = TK_COLON; break;
+        case ':':
+            if (peek(L) == '=') {
+                advance(L);
+                t = TK_WALRUS;
+            } else {
+                t = TK_COLON;
+            }
+            break;
+
         case '?':
             if (peek(L) == '?') { advance(L); t = TK_QQ; }
             else if (peek(L) == '.') { advance(L); t = TK_QDOT; }

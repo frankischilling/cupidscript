@@ -62,6 +62,7 @@ typedef enum {
     TK_SEMI,
     TK_DOT,
     TK_COLON,
+    TK_WALRUS,      // :=
     TK_QMARK,
     TK_QQ,          // ??
     TK_QDOT,        // ?.

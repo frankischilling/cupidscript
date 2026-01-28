@@ -4075,7 +4075,11 @@ static void yaml_cleanup(yaml_parser* p) {
             free(p->anchors[i].name);
             p->anchors[i].name = NULL;
         }
-        cs_value_release(p->anchors[i].value);
+        // Only release if value is not already nil (avoid double-release)
+        if (p->anchors[i].value.type != CS_T_NIL) {
+            cs_value_release(p->anchors[i].value);
+            p->anchors[i].value = cs_nil();
+        }
     }
     for (size_t i = 0; i < p->tag_directive_count; i++) {
         if (p->tag_directives[i].handle) {
@@ -5509,7 +5513,8 @@ static cs_value yaml_parse_map(yaml_parser* p, int base_indent, int* ok) {
         // Expect colon
         if (yaml_peek(p) != ':') {
             cs_value_release(key);
-            cs_value_release(map);
+            // Don't release map - just break and return the partial map
+            // (no colon means this isn't a map entry, stop parsing)
             break;
         }
         yaml_advance(p);
@@ -6601,10 +6606,15 @@ static int nf_yaml_parse_all(cs_vm* vm, void* ud, int argc, const cs_value* argv
 
         // Clean up anchors from this document (they don't persist across documents)
         for (size_t i = 0; i < p.anchor_count; i++) {
-            free(p.anchors[i].name);
-            p.anchors[i].name = NULL;
-            cs_value_release(p.anchors[i].value);
-            p.anchors[i].value = cs_nil();
+            if (p.anchors[i].name) {
+                free(p.anchors[i].name);
+                p.anchors[i].name = NULL;
+            }
+            // Only release if value is not already nil (avoid double-release)
+            if (p.anchors[i].value.type != CS_T_NIL) {
+                cs_value_release(p.anchors[i].value);
+                p.anchors[i].value = cs_nil();
+            }
         }
         p.anchor_count = 0;
         // Note: tag_directives are NOT freed here - they're freed once at the end in yaml_cleanup()
@@ -9769,29 +9779,30 @@ void cs_register_stdlib(cs_vm* vm) {
     // Error code constants (ERR.*)
     cs_value err_map = cs_map(vm);
     if (err_map.as.p) {
-        cs_map_set(err_map, "INVALID_ARG", cs_str(vm, "INVALID_ARG"));
-        cs_map_set(err_map, "TYPE_ERROR", cs_str(vm, "TYPE_ERROR"));
-        cs_map_set(err_map, "DIV_ZERO", cs_str(vm, "DIV_ZERO"));
-        cs_map_set(err_map, "OUT_OF_BOUNDS", cs_str(vm, "OUT_OF_BOUNDS"));
-        cs_map_set(err_map, "NOT_FOUND", cs_str(vm, "NOT_FOUND"));
-        cs_map_set(err_map, "ASSERTION", cs_str(vm, "ASSERTION"));
-        cs_map_set(err_map, "GENERIC", cs_str(vm, "ERROR"));
+        cs_value tmp;
+        tmp = cs_str(vm, "INVALID_ARG");    cs_map_set(err_map, "INVALID_ARG", tmp);    cs_value_release(tmp);
+        tmp = cs_str(vm, "TYPE_ERROR");     cs_map_set(err_map, "TYPE_ERROR", tmp);     cs_value_release(tmp);
+        tmp = cs_str(vm, "DIV_ZERO");       cs_map_set(err_map, "DIV_ZERO", tmp);       cs_value_release(tmp);
+        tmp = cs_str(vm, "OUT_OF_BOUNDS");  cs_map_set(err_map, "OUT_OF_BOUNDS", tmp);  cs_value_release(tmp);
+        tmp = cs_str(vm, "NOT_FOUND");      cs_map_set(err_map, "NOT_FOUND", tmp);      cs_value_release(tmp);
+        tmp = cs_str(vm, "ASSERTION");      cs_map_set(err_map, "ASSERTION", tmp);      cs_value_release(tmp);
+        tmp = cs_str(vm, "ERROR");          cs_map_set(err_map, "GENERIC", tmp);        cs_value_release(tmp);
 
         // Network error codes
-        cs_map_set(err_map, "NET_RESOLVE", cs_str(vm, "NET_RESOLVE"));
-        cs_map_set(err_map, "NET_CONNECT", cs_str(vm, "NET_CONNECT"));
-        cs_map_set(err_map, "NET_TIMEOUT", cs_str(vm, "NET_TIMEOUT"));
-        cs_map_set(err_map, "NET_CLOSED", cs_str(vm, "NET_CLOSED"));
-        cs_map_set(err_map, "NET_SEND", cs_str(vm, "NET_SEND"));
-        cs_map_set(err_map, "NET_RECV", cs_str(vm, "NET_RECV"));
-        cs_map_set(err_map, "HTTP_PARSE", cs_str(vm, "HTTP_PARSE"));
-        cs_map_set(err_map, "HTTP_REDIRECT", cs_str(vm, "HTTP_REDIRECT"));
-        cs_map_set(err_map, "HTTP_NO_TLS", cs_str(vm, "HTTP_NO_TLS"));
-        cs_map_set(err_map, "TLS_INIT", cs_str(vm, "TLS_INIT"));
-        cs_map_set(err_map, "TLS_HANDSHAKE", cs_str(vm, "TLS_HANDSHAKE"));
-        cs_map_set(err_map, "TLS_CERT", cs_str(vm, "TLS_CERT"));
-        cs_map_set(err_map, "TLS_READ", cs_str(vm, "TLS_READ"));
-        cs_map_set(err_map, "TLS_WRITE", cs_str(vm, "TLS_WRITE"));
+        tmp = cs_str(vm, "NET_RESOLVE");    cs_map_set(err_map, "NET_RESOLVE", tmp);    cs_value_release(tmp);
+        tmp = cs_str(vm, "NET_CONNECT");    cs_map_set(err_map, "NET_CONNECT", tmp);    cs_value_release(tmp);
+        tmp = cs_str(vm, "NET_TIMEOUT");    cs_map_set(err_map, "NET_TIMEOUT", tmp);    cs_value_release(tmp);
+        tmp = cs_str(vm, "NET_CLOSED");     cs_map_set(err_map, "NET_CLOSED", tmp);     cs_value_release(tmp);
+        tmp = cs_str(vm, "NET_SEND");       cs_map_set(err_map, "NET_SEND", tmp);       cs_value_release(tmp);
+        tmp = cs_str(vm, "NET_RECV");       cs_map_set(err_map, "NET_RECV", tmp);       cs_value_release(tmp);
+        tmp = cs_str(vm, "HTTP_PARSE");     cs_map_set(err_map, "HTTP_PARSE", tmp);     cs_value_release(tmp);
+        tmp = cs_str(vm, "HTTP_REDIRECT");  cs_map_set(err_map, "HTTP_REDIRECT", tmp);  cs_value_release(tmp);
+        tmp = cs_str(vm, "HTTP_NO_TLS");    cs_map_set(err_map, "HTTP_NO_TLS", tmp);    cs_value_release(tmp);
+        tmp = cs_str(vm, "TLS_INIT");       cs_map_set(err_map, "TLS_INIT", tmp);       cs_value_release(tmp);
+        tmp = cs_str(vm, "TLS_HANDSHAKE");  cs_map_set(err_map, "TLS_HANDSHAKE", tmp);  cs_value_release(tmp);
+        tmp = cs_str(vm, "TLS_CERT");       cs_map_set(err_map, "TLS_CERT", tmp);       cs_value_release(tmp);
+        tmp = cs_str(vm, "TLS_READ");       cs_map_set(err_map, "TLS_READ", tmp);       cs_value_release(tmp);
+        tmp = cs_str(vm, "TLS_WRITE");      cs_map_set(err_map, "TLS_WRITE", tmp);      cs_value_release(tmp);
         
         // Register as global ERR constant
         cs_register_global(vm, "ERR", err_map);
