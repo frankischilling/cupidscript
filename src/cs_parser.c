@@ -324,27 +324,109 @@ static ast* parse_primary(parser* P) {
     }
 
     if (accept(P, TK_LBRACKET)) {
+        // Could be list literal or list comprehension
+        // Lookahead: if we see expr followed by 'for', it's a comprehension
+        if (P->tok.type == TK_RBRACKET) {
+            // Empty list
+            ast* n = node(P, N_LISTLIT);
+            next(P);  // consume ]
+            n->as.listlit.items = NULL;
+            n->as.listlit.count = 0;
+            return n;
+        }
+        
+        // Parse first expression (handle spread)
+        ast* first_expr = NULL;
+        if (accept(P, TK_DOTDOTDOT)) {
+            ast* sp = node(P, N_SPREAD);
+            sp->as.spread.expr = parse_expr(P);
+            first_expr = sp;
+        } else {
+            first_expr = parse_expr(P);
+        }
+
+        // Check if this is a comprehension
+        if (first_expr && first_expr->type != N_SPREAD && P->tok.type == TK_FOR) {
+            // List comprehension: [expr for var in iterable]
+            ast* n = node(P, N_LISTCOMP);
+            n->as.listcomp.expr = first_expr;
+            n->as.listcomp.var = NULL;
+            n->as.listcomp.var2 = NULL;
+            n->as.listcomp.iterable = NULL;
+            n->as.listcomp.filter = NULL;
+            
+            next(P);  // consume 'for'
+            
+            if (P->tok.type != TK_IDENT) {
+                ast_free(first_expr);
+                if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after 'for'");
+                return NULL;
+            }
+            n->as.listcomp.var = cs_strndup2(P->tok.start, P->tok.len);
+            next(P);
+            
+            // Check for second variable (for map iteration)
+            if (accept(P, TK_COMMA)) {
+                if (P->tok.type != TK_IDENT) {
+                    ast_free(n);
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after ','");
+                    return NULL;
+                }
+                n->as.listcomp.var2 = cs_strndup2(P->tok.start, P->tok.len);
+                next(P);
+            }
+            
+            if (!accept(P, TK_IN)) {
+                ast_free(n);
+                if (!P->error) P->error = fmt_err(P, &P->tok, "expected 'in' in comprehension");
+                return NULL;
+            }
+            
+            n->as.listcomp.iterable = parse_expr(P);
+            if (!n->as.listcomp.iterable) {
+                ast_free(n);
+                return NULL;
+            }
+            
+            // Optional filter: if condition
+            if (accept(P, TK_IF)) {
+                n->as.listcomp.filter = parse_expr(P);
+                if (!n->as.listcomp.filter) {
+                    ast_free(n);
+                    return NULL;
+                }
+            }
+            
+            expect(P, TK_RBRACKET, "expected ']'");
+            return n;
+        }
+        
+        // Regular list literal
         ast* n = node(P, N_LISTLIT);
-        size_t cap = 8, cnt = 0;
-        ast** items = NULL;
-        if (P->tok.type != TK_RBRACKET) {
-            items = (ast**)malloc(sizeof(ast*) * cap);
-            while (1) {
-                if (cnt == cap) { cap *= 2; items = (ast**)realloc(items, sizeof(ast*) * cap); }
-                if (accept(P, TK_DOTDOTDOT)) {
-                    ast* sp = node(P, N_SPREAD);
-                    sp->as.spread.expr = parse_expr(P);
-                    items[cnt++] = sp;
-                } else {
-                    items[cnt++] = parse_expr(P);
+        size_t cap = 8, cnt = 1;
+        ast** items = (ast**)malloc(sizeof(ast*) * cap);
+        items[0] = first_expr;
+        
+        if (accept(P, TK_COMMA)) {
+            if (P->tok.type != TK_RBRACKET) {
+                while (1) {
+                    if (cnt == cap) { cap *= 2; items = (ast**)realloc(items, sizeof(ast*) * cap); }
+                    if (accept(P, TK_DOTDOTDOT)) {
+                        ast* sp = node(P, N_SPREAD);
+                        sp->as.spread.expr = parse_expr(P);
+                        items[cnt++] = sp;
+                    } else {
+                        items[cnt++] = parse_expr(P);
+                    }
+                    if (accept(P, TK_COMMA)) {
+                        if (P->tok.type == TK_RBRACKET) break;
+                        continue;
+                    }
+                    break;
                 }
-                if (accept(P, TK_COMMA)) {
-                    if (P->tok.type == TK_RBRACKET) break;
-                    continue;
-                }
-                break;
             }
         }
+        
         expect(P, TK_RBRACKET, "expected ']'");
         n->as.listlit.items = items;
         n->as.listlit.count = cnt;
@@ -352,42 +434,189 @@ static ast* parse_primary(parser* P) {
     }
 
     if (accept(P, TK_LBRACE)) {
-        ast* n = node(P, N_MAPLIT);
-        size_t cap = 8, cnt = 0;
+        // Could be map literal or map comprehension
+        if (P->tok.type == TK_RBRACE) {
+            // Empty map
+            ast* n = node(P, N_MAPLIT);
+            next(P);  // consume }
+            n->as.maplit.keys = NULL;
+            n->as.maplit.vals = NULL;
+            n->as.maplit.count = 0;
+            return n;
+        }
+
+        // Parse first key expression (handle spread)
+        ast* first_key = NULL;
+        if (accept(P, TK_DOTDOTDOT)) {
+            ast* sp = node(P, N_SPREAD);
+            sp->as.spread.expr = parse_expr(P);
+            first_key = sp;
+        } else {
+            first_key = parse_expr(P);
+        }
+
+        // Declare shared variables for map literal parsing
+        // (needed because of goto between different code paths)
+        ast* n = NULL;
+        size_t cap = 0, cnt = 0;
         ast** keys = NULL;
         ast** vals = NULL;
-        if (P->tok.type != TK_RBRACE) {
+
+        // Check for comprehension: {k: v for k, v in iter}
+        if (first_key && first_key->type == N_IDENT && P->tok.type == TK_COLON) {
+            // Could be either map literal or map comprehension
+            // Save the identifier name
+            char* key_ident = strdup(first_key->as.ident.name);
+            next(P);  // consume ':'
+
+            ast* first_val = parse_expr(P);
+
+            if (P->tok.type == TK_FOR) {
+                // Map comprehension: {k: v for k, v in iterable}
+                ast* n = node(P, N_MAPCOMP);
+                n->as.mapcomp.key_expr = NULL;
+                n->as.mapcomp.val_expr = NULL;
+                n->as.mapcomp.key_var = NULL;
+                n->as.mapcomp.val_var = NULL;
+                n->as.mapcomp.iterable = NULL;
+                n->as.mapcomp.filter = NULL;
+                
+                // Convert identifiers to expressions if needed
+                if (first_key->type == N_IDENT) {
+                    n->as.mapcomp.key_expr = first_key;
+                } else {
+                    ast_free(first_key);
+                    ast* id_node = node(P, N_IDENT);
+                    id_node->as.ident.name = key_ident;
+                    n->as.mapcomp.key_expr = id_node;
+                }
+                
+                n->as.mapcomp.val_expr = first_val;
+                
+                next(P);  // consume 'for'
+                
+                if (P->tok.type != TK_IDENT) {
+                    ast_free(n);
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after 'for'");
+                    return NULL;
+                }
+                n->as.mapcomp.key_var = cs_strndup2(P->tok.start, P->tok.len);
+                next(P);
+                
+                // Optional second variable for map iteration
+                if (accept(P, TK_COMMA)) {
+                    if (P->tok.type != TK_IDENT) {
+                        ast_free(n);
+                        if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after ','");
+                        return NULL;
+                    }
+                    n->as.mapcomp.val_var = cs_strndup2(P->tok.start, P->tok.len);
+                    next(P);
+                }
+                
+                if (!accept(P, TK_IN)) {
+                    ast_free(n);
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "expected 'in' in comprehension");
+                    return NULL;
+                }
+                
+                n->as.mapcomp.iterable = parse_expr(P);
+                if (!n->as.mapcomp.iterable) {
+                    ast_free(n);
+                    return NULL;
+                }
+                
+                // Optional filter
+                if (accept(P, TK_IF)) {
+                    n->as.mapcomp.filter = parse_expr(P);
+                    if (!n->as.mapcomp.filter) {
+                        ast_free(n);
+                        return NULL;
+                    }
+                }
+                
+                expect(P, TK_RBRACE, "expected '}'");
+                free(key_ident);
+                return n;
+            }
+            
+            // Regular map literal with shorthand key
+            free(key_ident);
+            ast* key_lit = make_quoted_str_lit(P, first_key->as.ident.name);
+            ast_free(first_key);
+            first_key = key_lit;
+
+            n = node(P, N_MAPLIT);
+            cap = 8;
+            cnt = 1;
             keys = (ast**)malloc(sizeof(ast*) * cap);
             vals = (ast**)malloc(sizeof(ast*) * cap);
-            while (1) {
-                if (cnt == cap) {
-                    cap *= 2;
-                    keys = (ast**)realloc(keys, sizeof(ast*) * cap);
-                    vals = (ast**)realloc(vals, sizeof(ast*) * cap);
+            keys[0] = first_key;
+            vals[0] = first_val;
+            
+            if (accept(P, TK_COMMA)) {
+                if (P->tok.type != TK_RBRACE) {
+                    goto continue_map_literal;
                 }
-                if (accept(P, TK_DOTDOTDOT)) {
-                    ast* sp = node(P, N_SPREAD);
-                    sp->as.spread.expr = parse_expr(P);
-                    keys[cnt] = sp;
-                    vals[cnt] = NULL;
-                } else {
-                    keys[cnt] = parse_expr(P);
-                    if (keys[cnt] && keys[cnt]->type == N_IDENT && P->tok.type == TK_COLON) {
-                        ast* key_lit = make_quoted_str_lit(P, keys[cnt]->as.ident.name);
-                        ast_free(keys[cnt]);
-                        keys[cnt] = key_lit;
+            }
+            
+            expect(P, TK_RBRACE, "expected '}'");
+            n->as.maplit.keys = keys;
+            n->as.maplit.vals = vals;
+            n->as.maplit.count = cnt;
+            return n;
+        }
+
+        // Regular map literal
+        n = node(P, N_MAPLIT);
+        cap = 8;
+        cnt = 1;
+        keys = (ast**)malloc(sizeof(ast*) * cap);
+        vals = (ast**)malloc(sizeof(ast*) * cap);
+
+        if (first_key && first_key->type == N_SPREAD) {
+            keys[0] = first_key;
+            vals[0] = NULL;
+        } else {
+            keys[0] = first_key;
+            expect(P, TK_COLON, "expected ':' in map literal");
+            vals[0] = parse_expr(P);
+        }
+        
+        if (accept(P, TK_COMMA)) {
+            if (P->tok.type != TK_RBRACE) {
+                continue_map_literal:
+                while (1) {
+                    if (cnt == cap) {
+                        cap *= 2;
+                        keys = (ast**)realloc(keys, sizeof(ast*) * cap);
+                        vals = (ast**)realloc(vals, sizeof(ast*) * cap);
                     }
-                    expect(P, TK_COLON, "expected ':' in map literal");
-                    vals[cnt] = parse_expr(P);
+                    if (accept(P, TK_DOTDOTDOT)) {
+                        ast* sp = node(P, N_SPREAD);
+                        sp->as.spread.expr = parse_expr(P);
+                        keys[cnt] = sp;
+                        vals[cnt] = NULL;
+                    } else {
+                        keys[cnt] = parse_expr(P);
+                        if (keys[cnt] && keys[cnt]->type == N_IDENT && P->tok.type == TK_COLON) {
+                            ast* key_lit = make_quoted_str_lit(P, keys[cnt]->as.ident.name);
+                            ast_free(keys[cnt]);
+                            keys[cnt] = key_lit;
+                        }
+                        expect(P, TK_COLON, "expected ':' in map literal");
+                        vals[cnt] = parse_expr(P);
+                    }
+                    cnt++;
+                    if (accept(P, TK_COMMA)) {
+                        if (P->tok.type == TK_RBRACE) break;
+                        continue;
+                    }
+                    break;
                 }
-                cnt++;
-                if (accept(P, TK_COMMA)) {
-                    if (P->tok.type == TK_RBRACE) break;
-                    continue;
-                }
-                break;
             }
         }
+        
         expect(P, TK_RBRACE, "expected '}'");
         n->as.maplit.keys = keys;
         n->as.maplit.vals = vals;
@@ -408,9 +637,135 @@ static ast* parse_primary(parser* P) {
     }
 
     if (accept(P, TK_LPAREN)) {
-        ast* e = parse_expr(P);
-        expect(P, TK_RPAREN, "expected ')'");
-        return e;
+        // Could be grouped expression or tuple literal
+        // Tuple patterns:
+        //   - Empty: ()
+        //   - Named: (name: value, ...)
+        //   - Positional with comma: (value, value, ...)
+        //   - Single with trailing comma: (value,)
+        // Grouped: (expr)
+        
+        if (P->tok.type == TK_RPAREN) {
+            // Empty tuple: ()
+            expect(P, TK_RPAREN, "expected ')'");
+            ast* n = node(P, N_TUPLELIT);
+            n->as.tuplelit.field_names = NULL;
+            n->as.tuplelit.field_values = NULL;
+            n->as.tuplelit.count = 0;
+            return n;
+        }
+        
+        // Check for named tuple: identifier followed by colon
+        int is_named_tuple = 0;
+        if (P->tok.type == TK_IDENT) {
+            // Save position to potentially backtrack
+            token saved_tok = P->tok;
+            size_t saved_pos = P->L.pos;
+            int saved_line = P->L.line;
+            int saved_col = P->L.col;
+            
+            next(P); // consume identifier
+            if (P->tok.type == TK_COLON) {
+                is_named_tuple = 1;
+            }
+            
+            // Restore position
+            P->tok = saved_tok;
+            P->L.pos = saved_pos;
+            P->L.line = saved_line;
+            P->L.col = saved_col;
+        }
+        
+        if (is_named_tuple) {
+            // Parse named tuple: (name: value, name: value, ...)
+            ast* n = node(P, N_TUPLELIT);
+            size_t cap = 4, cnt = 0;
+            char** names = (char**)malloc(sizeof(char*) * cap);
+            ast** vals = (ast**)malloc(sizeof(ast*) * cap);
+            
+            while (P->tok.type != TK_RPAREN) {
+                if (cnt == cap) {
+                    cap *= 2;
+                    names = (char**)realloc(names, sizeof(char*) * cap);
+                    vals = (ast**)realloc(vals, sizeof(ast*) * cap);
+                }
+                
+                // Expect identifier
+                if (P->tok.type != TK_IDENT) {
+                    if (!P->error) P->error = fmt_err(P, &P->tok, "expected field name");
+                    free(names);
+                    free(vals);
+                    return NULL;
+                }
+                
+                names[cnt] = cs_strndup2(P->tok.start, P->tok.len);
+                next(P);
+                
+                expect(P, TK_COLON, "expected ':' after field name");
+                vals[cnt] = parse_expr(P);
+                cnt++;
+                
+                if (!accept(P, TK_COMMA)) break;
+            }
+            
+            expect(P, TK_RPAREN, "expected ')'");
+            n->as.tuplelit.field_names = names;
+            n->as.tuplelit.field_values = vals;
+            n->as.tuplelit.count = cnt;
+            return n;
+        }
+        
+        // Parse first element/expression for positional tuple or grouped expression
+        ast* first = parse_expr(P);
+        
+        if (accept(P, TK_COMMA)) {
+            // Could be tuple: (expr, ...) or (expr,)
+            // Check for trailing comma case: (expr,)
+            if (P->tok.type == TK_RPAREN) {
+                // Single element tuple with trailing comma
+                ast* n = node(P, N_TUPLELIT);
+                char** names = (char**)calloc(1, sizeof(char*));
+                ast** vals = (ast**)malloc(sizeof(ast*));
+                names[0] = NULL;
+                vals[0] = first;
+                expect(P, TK_RPAREN, "expected ')'");
+                n->as.tuplelit.field_names = names;
+                n->as.tuplelit.field_values = vals;
+                n->as.tuplelit.count = 1;
+                return n;
+            }
+            
+            // Multi-element positional tuple: (expr, expr, ...)
+            ast* n = node(P, N_TUPLELIT);
+            size_t cap = 4, cnt = 1;
+            char** names = (char**)calloc(cap, sizeof(char*));
+            ast** vals = (ast**)malloc(sizeof(ast*) * cap);
+            names[0] = NULL;
+            vals[0] = first;
+            
+            // Parse remaining elements
+            while (P->tok.type != TK_RPAREN) {
+                if (cnt == cap) {
+                    cap *= 2;
+                    names = (char**)realloc(names, sizeof(char*) * cap);
+                    vals = (ast**)realloc(vals, sizeof(ast*) * cap);
+                }
+                names[cnt] = NULL;
+                vals[cnt] = parse_expr(P);
+                cnt++;
+                if (!accept(P, TK_COMMA)) break;
+            }
+            
+            expect(P, TK_RPAREN, "expected ')'");
+            n->as.tuplelit.field_names = names;
+            n->as.tuplelit.field_values = vals;
+            n->as.tuplelit.count = cnt;
+            return n;
+        } else {
+            // No comma after first expr: grouped expression (expr)
+            expect(P, TK_RPAREN, "expected ')'");
+            return first;
+        }
     }
 
     if (P->tok.type == TK_PLACEHOLDER) {
@@ -1983,6 +2338,29 @@ void ast_free(ast* node) {
             }
             free(node->as.maplit.keys);
             free(node->as.maplit.vals);
+            break;
+        case N_TUPLELIT:
+            for (size_t i = 0; i < node->as.tuplelit.count; i++) {
+                free(node->as.tuplelit.field_names[i]);
+                ast_free(node->as.tuplelit.field_values[i]);
+            }
+            free(node->as.tuplelit.field_names);
+            free(node->as.tuplelit.field_values);
+            break;
+        case N_LISTCOMP:
+            ast_free(node->as.listcomp.expr);
+            free(node->as.listcomp.var);
+            free(node->as.listcomp.var2);
+            ast_free(node->as.listcomp.iterable);
+            ast_free(node->as.listcomp.filter);
+            break;
+        case N_MAPCOMP:
+            ast_free(node->as.mapcomp.key_expr);
+            ast_free(node->as.mapcomp.val_expr);
+            free(node->as.mapcomp.key_var);
+            free(node->as.mapcomp.val_var);
+            ast_free(node->as.mapcomp.iterable);
+            ast_free(node->as.mapcomp.filter);
             break;
         case N_PATTERN_LIST:
             for (size_t i = 0; i < node->as.list_pattern.count; i++) {

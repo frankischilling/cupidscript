@@ -45,6 +45,9 @@ typedef enum {
     N_OPTGETFIELD,
     N_LISTLIT,
     N_MAPLIT,
+    N_TUPLELIT,
+    N_LISTCOMP,
+    N_MAPCOMP,
     N_FUNCLIT,
     N_SPREAD,
     N_IDENT,
@@ -159,6 +162,26 @@ struct ast {
         struct { char** params; ast** defaults; size_t param_count; char* rest_param; ast* body; int is_async; int is_generator; } funclit;
         struct { ast** items; size_t count; } listlit;
         struct { ast** keys; ast** vals; size_t count; } maplit;
+        struct { 
+            char** field_names;  // NULL for positional fields
+            ast** field_values;
+            size_t count;
+        } tuplelit;
+        struct {
+            ast* expr;           // expression to evaluate
+            char* var;           // loop variable name
+            char* var2;          // second variable for map iteration (optional, NULL if not used)
+            ast* iterable;       // what to iterate over
+            ast* filter;         // optional filter condition (NULL if none)
+        } listcomp;
+        struct {
+            ast* key_expr;       // key expression
+            ast* val_expr;       // value expression
+            char* key_var;       // key variable name
+            char* val_var;       // value variable name
+            ast* iterable;       // what to iterate over
+            ast* filter;         // optional filter condition (NULL if none)
+        } mapcomp;
         struct { char** names; size_t count; char* rest_name; } list_pattern;
             struct { char** keys; char** names; size_t count; char* rest_name; } map_pattern;
             struct {

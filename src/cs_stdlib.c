@@ -305,6 +305,11 @@ static const char* value_repr(cs_value v, char* buf, size_t buf_sz) {
                 (long long)r->end);
             return buf;
         }
+        case CS_T_TUPLE: {
+            cs_tuple_obj* t = (cs_tuple_obj*)v.as.p;
+            snprintf(buf, buf_sz, "<tuple len=%lld>", (long long)(t ? t->len : 0));
+            return buf;
+        }
         case CS_T_FUNC:   return "<function>";
         case CS_T_NATIVE: return "<native>";
         case CS_T_PROMISE: return "<promise>";
@@ -4053,16 +4058,34 @@ static void yaml_init(yaml_parser* p, const char* s, size_t len, cs_vm* vm) {
     for (size_t i = 0; i < YAML_MAX_INDENT_DEPTH; i++) {
         p->indent_stack[i] = -1;
     }
+    // Initialize all anchor and tag directive pointers to NULL
+    for (size_t i = 0; i < YAML_MAX_ANCHORS; i++) {
+        p->anchors[i].name = NULL;
+        p->anchors[i].value = cs_nil();
+    }
+    for (size_t i = 0; i < YAML_MAX_TAG_DIRECTIVES; i++) {
+        p->tag_directives[i].handle = NULL;
+        p->tag_directives[i].prefix = NULL;
+    }
 }
 
 static void yaml_cleanup(yaml_parser* p) {
     for (size_t i = 0; i < p->anchor_count; i++) {
-        free(p->anchors[i].name);
+        if (p->anchors[i].name) {
+            free(p->anchors[i].name);
+            p->anchors[i].name = NULL;
+        }
         cs_value_release(p->anchors[i].value);
     }
     for (size_t i = 0; i < p->tag_directive_count; i++) {
-        free(p->tag_directives[i].handle);
-        free(p->tag_directives[i].prefix);
+        if (p->tag_directives[i].handle) {
+            free(p->tag_directives[i].handle);
+            p->tag_directives[i].handle = NULL;
+        }
+        if (p->tag_directives[i].prefix) {
+            free(p->tag_directives[i].prefix);
+            p->tag_directives[i].prefix = NULL;
+        }
     }
 }
 
@@ -6576,17 +6599,15 @@ static int nf_yaml_parse_all(cs_vm* vm, void* ud, int argc, const cs_value* argv
         cs_list_push(docs, doc);
         cs_value_release(doc);
 
-        // Clean up anchors and directives from this document
+        // Clean up anchors from this document (they don't persist across documents)
         for (size_t i = 0; i < p.anchor_count; i++) {
             free(p.anchors[i].name);
+            p.anchors[i].name = NULL;
             cs_value_release(p.anchors[i].value);
+            p.anchors[i].value = cs_nil();
         }
         p.anchor_count = 0;
-        for (size_t i = 0; i < p.tag_directive_count; i++) {
-            free(p.tag_directives[i].handle);
-            free(p.tag_directives[i].prefix);
-        }
-        p.tag_directive_count = 0;
+        // Note: tag_directives are NOT freed here - they're freed once at the end in yaml_cleanup()
 
         // Skip to document end or next document start
         while (p.pos < p.len) {

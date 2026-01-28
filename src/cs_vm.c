@@ -3292,6 +3292,33 @@ struct_done:
             return mv;
         }
 
+        case N_TUPLELIT: {
+            size_t count = e->as.tuplelit.count;
+            cs_tuple_obj* t = cs_tuple_new(count);
+            if (!t) {
+                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                *ok = 0;
+                return cs_nil();
+            }
+            for (size_t i = 0; i < count; i++) {
+                cs_value v = eval_expr(vm, env, e->as.tuplelit.field_values[i], ok);
+                if (!*ok) {
+                    cs_tuple_decref(t);
+                    return cs_nil();
+                }
+                t->fields[i].value = v;
+                if (e->as.tuplelit.field_names && e->as.tuplelit.field_names[i]) {
+                    t->fields[i].name = cs_strdup2(e->as.tuplelit.field_names[i]);
+                } else {
+                    t->fields[i].name = NULL;
+                }
+            }
+            cs_value result;
+            result.type = CS_T_TUPLE;
+            result.as.p = t;
+            return result;
+        }
+
         case N_INDEX: {
             cs_value target = eval_expr(vm, env, e->as.index.target, ok);
             if (!*ok) return cs_nil();
@@ -3310,8 +3337,15 @@ struct_done:
                 }
             } else if (target.type == CS_T_MAP) {
                 out = map_get_value(as_map(target), index);
+            } else if (target.type == CS_T_TUPLE && index.type == CS_T_INT) {
+                cs_tuple_obj* t = (cs_tuple_obj*)target.as.p;
+                if (!t || index.as.i < 0 || (size_t)index.as.i >= t->len) {
+                    out = cs_nil();
+                } else {
+                    out = cs_value_copy(t->fields[(size_t)index.as.i].value);
+                }
             } else {
-                vm_set_err(vm, "indexing expects list[int], bytes[int], or map[key]", e->source_name, e->line, e->col);
+                vm_set_err(vm, "indexing expects list[int], bytes[int], map[key], or tuple[int]", e->source_name, e->line, e->col);
                 *ok = 0;
             }
 
@@ -3342,8 +3376,19 @@ struct_done:
             cs_value out = cs_nil();
             if (target.type == CS_T_MAP) {
                 out = map_get_cstr(as_map(target), e->as.getfield.field);
+            } else if (target.type == CS_T_TUPLE) {
+                cs_tuple_obj* t = (cs_tuple_obj*)target.as.p;
+                if (t) {
+                    // Look for named field
+                    for (size_t i = 0; i < t->len; i++) {
+                        if (t->fields[i].name && strcmp(t->fields[i].name, e->as.getfield.field) == 0) {
+                            out = cs_value_copy(t->fields[i].value);
+                            break;
+                        }
+                    }
+                }
             } else {
-                vm_set_err(vm, "field access expects map", e->source_name, e->line, e->col);
+                vm_set_err(vm, "field access expects map or tuple", e->source_name, e->line, e->col);
                 *ok = 0;
             }
             cs_value_release(target);
@@ -4115,6 +4160,279 @@ struct_done_call:
             return out;
         }
 
+        case N_LISTCOMP: {
+            // Evaluate the iterable
+            cs_value iterable = eval_expr(vm, env, e->as.listcomp.iterable, ok);
+            if (!*ok) return cs_nil();
+
+            // Create result list
+            cs_value result = cs_list(vm);
+            if (!result.as.p) {
+                cs_value_release(iterable);
+                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                *ok = 0;
+                return cs_nil();
+            }
+            cs_list_obj* result_list = as_list(result);
+
+            // Create a new scope for the loop variable
+            cs_env* loop_env = env_new(env);
+            if (!loop_env) {
+                cs_value_release(iterable);
+                cs_value_release(result);
+                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                *ok = 0;
+                return cs_nil();
+            }
+
+            if (iterable.type == CS_T_LIST) {
+                cs_list_obj* list = as_list(iterable);
+                for (size_t i = 0; i < list->len && *ok; i++) {
+                    env_set_here(loop_env, e->as.listcomp.var, cs_value_copy(list->items[i]));
+                    if (e->as.listcomp.var2) {
+                        env_set_here(loop_env, e->as.listcomp.var2, cs_int((int64_t)i));
+                    }
+                    // Check filter
+                    if (e->as.listcomp.filter) {
+                        cs_value cond = eval_expr(vm, loop_env, e->as.listcomp.filter, ok);
+                        if (!*ok) break;
+                        int pass = is_truthy(cond);
+                        cs_value_release(cond);
+                        if (!pass) continue;
+                    }
+                    // Evaluate expression
+                    cs_value v = eval_expr(vm, loop_env, e->as.listcomp.expr, ok);
+                    if (!*ok) break;
+                    if (!list_push(result_list, v)) {
+                        cs_value_release(v);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        break;
+                    }
+                    cs_value_release(v);
+                }
+            } else if (iterable.type == CS_T_RANGE) {
+                cs_range_obj* r = (cs_range_obj*)iterable.as.p;
+                int64_t step = r->step ? r->step : 1;
+                int64_t end = r->inclusive ? r->end + (step > 0 ? 1 : -1) : r->end;
+                for (int64_t i = r->start; (step > 0 ? i < end : i > end) && *ok; i += step) {
+                    env_set_here(loop_env, e->as.listcomp.var, cs_int(i));
+                    // Check filter
+                    if (e->as.listcomp.filter) {
+                        cs_value cond = eval_expr(vm, loop_env, e->as.listcomp.filter, ok);
+                        if (!*ok) break;
+                        int pass = is_truthy(cond);
+                        cs_value_release(cond);
+                        if (!pass) continue;
+                    }
+                    // Evaluate expression
+                    cs_value v = eval_expr(vm, loop_env, e->as.listcomp.expr, ok);
+                    if (!*ok) break;
+                    if (!list_push(result_list, v)) {
+                        cs_value_release(v);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        break;
+                    }
+                    cs_value_release(v);
+                }
+            } else if (iterable.type == CS_T_MAP) {
+                cs_map_obj* m = as_map(iterable);
+                for (size_t i = 0; i < m->cap && *ok; i++) {
+                    if (!m->entries[i].in_use) continue;
+                    env_set_here(loop_env, e->as.listcomp.var, cs_value_copy(m->entries[i].key));
+                    if (e->as.listcomp.var2) {
+                        env_set_here(loop_env, e->as.listcomp.var2, cs_value_copy(m->entries[i].val));
+                    }
+                    // Check filter
+                    if (e->as.listcomp.filter) {
+                        cs_value cond = eval_expr(vm, loop_env, e->as.listcomp.filter, ok);
+                        if (!*ok) break;
+                        int pass = is_truthy(cond);
+                        cs_value_release(cond);
+                        if (!pass) continue;
+                    }
+                    // Evaluate expression
+                    cs_value v = eval_expr(vm, loop_env, e->as.listcomp.expr, ok);
+                    if (!*ok) break;
+                    if (!list_push(result_list, v)) {
+                        cs_value_release(v);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        break;
+                    }
+                    cs_value_release(v);
+                }
+            } else if (iterable.type == CS_T_STR) {
+                cs_string* s = (cs_string*)iterable.as.p;
+                for (size_t i = 0; i < s->len && *ok; i++) {
+                    char ch[2] = { s->data[i], '\0' };
+                    env_set_here(loop_env, e->as.listcomp.var, cs_str(vm, ch));
+                    if (e->as.listcomp.var2) {
+                        env_set_here(loop_env, e->as.listcomp.var2, cs_int((int64_t)i));
+                    }
+                    // Check filter
+                    if (e->as.listcomp.filter) {
+                        cs_value cond = eval_expr(vm, loop_env, e->as.listcomp.filter, ok);
+                        if (!*ok) break;
+                        int pass = is_truthy(cond);
+                        cs_value_release(cond);
+                        if (!pass) continue;
+                    }
+                    // Evaluate expression
+                    cs_value v = eval_expr(vm, loop_env, e->as.listcomp.expr, ok);
+                    if (!*ok) break;
+                    if (!list_push(result_list, v)) {
+                        cs_value_release(v);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        break;
+                    }
+                    cs_value_release(v);
+                }
+            } else {
+                vm_set_err(vm, "comprehension requires iterable (list, range, map, or string)", e->source_name, e->line, e->col);
+                *ok = 0;
+            }
+
+            env_decref(loop_env);
+            cs_value_release(iterable);
+            if (!*ok) {
+                cs_value_release(result);
+                return cs_nil();
+            }
+            return result;
+        }
+
+        case N_MAPCOMP: {
+            // Evaluate the iterable
+            cs_value iterable = eval_expr(vm, env, e->as.mapcomp.iterable, ok);
+            if (!*ok) return cs_nil();
+
+            // Create result map
+            cs_value result = cs_map(vm);
+            if (!result.as.p) {
+                cs_value_release(iterable);
+                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                *ok = 0;
+                return cs_nil();
+            }
+            cs_map_obj* result_map = as_map(result);
+
+            // Create a new scope for the loop variables
+            cs_env* loop_env = env_new(env);
+            if (!loop_env) {
+                cs_value_release(iterable);
+                cs_value_release(result);
+                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                *ok = 0;
+                return cs_nil();
+            }
+
+            if (iterable.type == CS_T_LIST) {
+                cs_list_obj* list = as_list(iterable);
+                for (size_t i = 0; i < list->len && *ok; i++) {
+                    env_set_here(loop_env, e->as.mapcomp.key_var, cs_value_copy(list->items[i]));
+                    if (e->as.mapcomp.val_var) {
+                        env_set_here(loop_env, e->as.mapcomp.val_var, cs_int((int64_t)i));
+                    }
+                    // Check filter
+                    if (e->as.mapcomp.filter) {
+                        cs_value cond = eval_expr(vm, loop_env, e->as.mapcomp.filter, ok);
+                        if (!*ok) break;
+                        int pass = is_truthy(cond);
+                        cs_value_release(cond);
+                        if (!pass) continue;
+                    }
+                    // Evaluate key and value expressions
+                    cs_value k = eval_expr(vm, loop_env, e->as.mapcomp.key_expr, ok);
+                    if (!*ok) break;
+                    cs_value v = eval_expr(vm, loop_env, e->as.mapcomp.val_expr, ok);
+                    if (!*ok) { cs_value_release(k); break; }
+                    if (!map_set_value(result_map, k, v)) {
+                        cs_value_release(k);
+                        cs_value_release(v);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        break;
+                    }
+                    cs_value_release(k);
+                    cs_value_release(v);
+                }
+            } else if (iterable.type == CS_T_RANGE) {
+                cs_range_obj* r = (cs_range_obj*)iterable.as.p;
+                int64_t step = r->step ? r->step : 1;
+                int64_t end = r->inclusive ? r->end + (step > 0 ? 1 : -1) : r->end;
+                for (int64_t i = r->start; (step > 0 ? i < end : i > end) && *ok; i += step) {
+                    env_set_here(loop_env, e->as.mapcomp.key_var, cs_int(i));
+                    // Check filter
+                    if (e->as.mapcomp.filter) {
+                        cs_value cond = eval_expr(vm, loop_env, e->as.mapcomp.filter, ok);
+                        if (!*ok) break;
+                        int pass = is_truthy(cond);
+                        cs_value_release(cond);
+                        if (!pass) continue;
+                    }
+                    // Evaluate key and value expressions
+                    cs_value k = eval_expr(vm, loop_env, e->as.mapcomp.key_expr, ok);
+                    if (!*ok) break;
+                    cs_value v = eval_expr(vm, loop_env, e->as.mapcomp.val_expr, ok);
+                    if (!*ok) { cs_value_release(k); break; }
+                    if (!map_set_value(result_map, k, v)) {
+                        cs_value_release(k);
+                        cs_value_release(v);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        break;
+                    }
+                    cs_value_release(k);
+                    cs_value_release(v);
+                }
+            } else if (iterable.type == CS_T_MAP) {
+                cs_map_obj* m = as_map(iterable);
+                for (size_t i = 0; i < m->cap && *ok; i++) {
+                    if (!m->entries[i].in_use) continue;
+                    env_set_here(loop_env, e->as.mapcomp.key_var, cs_value_copy(m->entries[i].key));
+                    if (e->as.mapcomp.val_var) {
+                        env_set_here(loop_env, e->as.mapcomp.val_var, cs_value_copy(m->entries[i].val));
+                    }
+                    // Check filter
+                    if (e->as.mapcomp.filter) {
+                        cs_value cond = eval_expr(vm, loop_env, e->as.mapcomp.filter, ok);
+                        if (!*ok) break;
+                        int pass = is_truthy(cond);
+                        cs_value_release(cond);
+                        if (!pass) continue;
+                    }
+                    // Evaluate key and value expressions
+                    cs_value k = eval_expr(vm, loop_env, e->as.mapcomp.key_expr, ok);
+                    if (!*ok) break;
+                    cs_value v = eval_expr(vm, loop_env, e->as.mapcomp.val_expr, ok);
+                    if (!*ok) { cs_value_release(k); break; }
+                    if (!map_set_value(result_map, k, v)) {
+                        cs_value_release(k);
+                        cs_value_release(v);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        break;
+                    }
+                    cs_value_release(k);
+                    cs_value_release(v);
+                }
+            } else {
+                vm_set_err(vm, "map comprehension requires iterable (list, range, or map)", e->source_name, e->line, e->col);
+                *ok = 0;
+            }
+
+            env_decref(loop_env);
+            cs_value_release(iterable);
+            if (!*ok) {
+                cs_value_release(result);
+                return cs_nil();
+            }
+            return result;
+        }
+
         default:
             vm_set_err(vm, "invalid expression node", e->source_name, e->line, e->col);
             *ok = 0;
@@ -4217,41 +4535,75 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
 
                 ast* pat = s->as.let_stmt.pattern;
                 if (pat->type == N_PATTERN_LIST) {
-                    if (v.type != CS_T_LIST) {
+                    if (v.type != CS_T_LIST && v.type != CS_T_TUPLE) {
                         cs_value_release(v);
-                        vm_set_err(vm, "list destructuring expects list", s->source_name, s->line, s->col);
+                        vm_set_err(vm, "list destructuring expects list or tuple", s->source_name, s->line, s->col);
                         r.ok = 0;
                         return r;
                     }
-                    cs_list_obj* l = as_list(v);
-                    for (size_t i = 0; i < pat->as.list_pattern.count; i++) {
-                        const char* name = pat->as.list_pattern.names[i];
-                        if (name && strcmp(name, "_") == 0) continue;
-                        cs_value item = cs_nil();
-                        if (l && i < l->len) item = cs_value_copy(l->items[i]);
-                        env_set_here_take(env, name, item, 0);
-                    }
-                    if (pat->as.list_pattern.rest_name && strcmp(pat->as.list_pattern.rest_name, "_") != 0) {
-                        cs_value rest = cs_list(vm);
-                        if (!rest.as.p) {
-                            cs_value_release(v);
-                            vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
-                            r.ok = 0;
-                            return r;
+                    if (v.type == CS_T_LIST) {
+                        cs_list_obj* l = as_list(v);
+                        for (size_t i = 0; i < pat->as.list_pattern.count; i++) {
+                            const char* name = pat->as.list_pattern.names[i];
+                            if (name && strcmp(name, "_") == 0) continue;
+                            cs_value item = cs_nil();
+                            if (l && i < l->len) item = cs_value_copy(l->items[i]);
+                            env_set_here_take(env, name, item, 0);
                         }
-                        if (l) {
-                            for (size_t i = pat->as.list_pattern.count; i < l->len; i++) {
-                                if (cs_list_push(rest, l->items[i]) != 0) {
-                                    cs_value_release(rest);
-                                    cs_value_release(v);
-                                    vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
-                                    r.ok = 0;
-                                    return r;
+                        if (pat->as.list_pattern.rest_name && strcmp(pat->as.list_pattern.rest_name, "_") != 0) {
+                            cs_value rest = cs_list(vm);
+                            if (!rest.as.p) {
+                                cs_value_release(v);
+                                vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                                r.ok = 0;
+                                return r;
+                            }
+                            if (l) {
+                                for (size_t i = pat->as.list_pattern.count; i < l->len; i++) {
+                                    if (cs_list_push(rest, l->items[i]) != 0) {
+                                        cs_value_release(rest);
+                                        cs_value_release(v);
+                                        vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                                        r.ok = 0;
+                                        return r;
+                                    }
                                 }
                             }
+                            env_set_here(env, pat->as.list_pattern.rest_name, rest);
+                            cs_value_release(rest);
                         }
-                        env_set_here(env, pat->as.list_pattern.rest_name, rest);
-                        cs_value_release(rest);
+                    } else {
+                        // CS_T_TUPLE
+                        cs_tuple_obj* t = (cs_tuple_obj*)v.as.p;
+                        for (size_t i = 0; i < pat->as.list_pattern.count; i++) {
+                            const char* name = pat->as.list_pattern.names[i];
+                            if (name && strcmp(name, "_") == 0) continue;
+                            cs_value item = cs_nil();
+                            if (t && i < t->len) item = cs_value_copy(t->fields[i].value);
+                            env_set_here_take(env, name, item, 0);
+                        }
+                        if (pat->as.list_pattern.rest_name && strcmp(pat->as.list_pattern.rest_name, "_") != 0) {
+                            cs_value rest = cs_list(vm);
+                            if (!rest.as.p) {
+                                cs_value_release(v);
+                                vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                                r.ok = 0;
+                                return r;
+                            }
+                            if (t) {
+                                for (size_t i = pat->as.list_pattern.count; i < t->len; i++) {
+                                    if (cs_list_push(rest, t->fields[i].value) != 0) {
+                                        cs_value_release(rest);
+                                        cs_value_release(v);
+                                        vm_set_err(vm, "out of memory", s->source_name, s->line, s->col);
+                                        r.ok = 0;
+                                        return r;
+                                    }
+                                }
+                            }
+                            env_set_here(env, pat->as.list_pattern.rest_name, rest);
+                            cs_value_release(rest);
+                        }
                     }
                 } else if (pat->type == N_PATTERN_MAP) {
                     if (v.type != CS_T_MAP) {
