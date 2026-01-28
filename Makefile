@@ -71,13 +71,13 @@ $(LIB): $(CS_OBJS)
 	$(AR) $(ARFLAGS) $@ $^
 
 $(BIN): $(CS_OBJS) $(CLI_OBJS)
-	$(CC) $(CFLAGS) -Isrc $^ -o $@ $(COVERAGE_LDFLAGS) $(LDFLAGS) -lm
+	$(CC) $(CFLAGS) -Isrc $^ -o $@ $(COVERAGE_LDFLAGS) $(LDFLAGS) -lz -lm
 
 $(OBJDIR)/c_api_tests.o: tests/c_api_tests.c
 	$(CC) $(CFLAGS) $(DEPFLAGS) -Isrc -c $< -o $@
 
 $(API_TEST_BIN): $(CS_OBJS) $(API_TEST_OBJS)
-	$(CC) $(CFLAGS) -Isrc $^ -o $@ $(COVERAGE_LDFLAGS) $(LDFLAGS) -lm
+	$(CC) $(CFLAGS) -Isrc $^ -o $@ $(COVERAGE_LDFLAGS) $(LDFLAGS) -lz -lm
 
 clean:
 	rm -rf $(OBJDIR) $(BINDIR)
