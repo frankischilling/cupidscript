@@ -1,4 +1,11 @@
+
 # Enums
+
+## Table of Contents
+
+- [Syntax](#syntax)
+- [Rules](#rules)
+- [Notes](#notes)
 
 ## Table of Contents
 

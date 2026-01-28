@@ -11,7 +11,7 @@ CupidScript is a small embeddable scripting language with:
 * A C lexer + recursive-descent parser
 * A tree-walking VM (interpreter)
 * Closures (function literals capture their environment)
-* Basic built-in types: `nil`, `bool`, `int`, `float`, `string`, `list`, `map`, `strbuf`, `range`, `promise`
+* Basic built-in types: `nil`, `bool`, `int`, `float`, `string`, `list`, `map`, `strbuf`, `range`, `promise`, `tuple`
 * Async/await with promises and a cooperative scheduler
 * Pattern matching (`match`) and `switch` with patterns
 * A practical standard library for scripts (printing, strings, collections, paths, regex, math, time, JSON)
@@ -78,7 +78,9 @@ print("sum:", add(xs[0], xs[1]));
 * [Classes & Inheritance](Classes-and-Inheritance)
 * [Structs](Structs)
 * [Enums](Enums)
+* [Tuples](TUPLES)
 * [Generators](Generators)
+* [Comprehensions](COMPREHENSIONS)
 * [Async & Await](Async-Await)
 * [Background Event Loop (Linux)](Event-Loop)
 * [Collections (list/map)](Collections)

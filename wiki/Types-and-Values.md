@@ -96,11 +96,42 @@ Promise values represent pending asynchronous results:
 * Resolved or rejected by the scheduler or `resolve`/`reject`
 * `await` blocks until a promise resolves and throws on rejection
 
+### `tuple`
+
+**Immutable, fixed-size** value groupings for structured data.
+
+* **Positional tuples**: `(10, 20, 30)` - accessed by index
+* **Named tuples**: `(x: 10, y: 20)` - accessed by field name
+* **Immutable**: Fields cannot be modified after creation
+* **Destructuring**: `let [x, y, z] = coords`
+* **Multiple returns**: Return multiple values from functions
+
+```cupidscript
+// Positional tuple
+let coords = (10, 20, 30)
+print(coords[0])  // 10
+
+// Named tuple
+let point = (x: 100, y: 200)
+print(point.x)    // 100
+print(point[0])   // 100 (also works)
+
+// Destructuring
+let [a, b, c] = coords
+
+// Function returns
+fn get_bounds() {
+    return (min: 0, max: 100)
+}
+```
+
+See [Tuples](TUPLES) for detailed documentation.
+
 ## Mutability
 
 * Lists, maps, and sets are mutable.
 * Bytes buffers are mutable.
-* Strings are immutable.
+* Strings and **tuples** are immutable.
 * `const` creates an immutable binding (reassignment is not allowed), but the value itself may still be mutable (e.g., list/map contents).
 
 ### `range`

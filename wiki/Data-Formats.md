@@ -1,4 +1,43 @@
+
 # Data Formats
+
+## Table of Contents
+
+- [RFC Standards Compliance](#rfc-standards-compliance)
+- [Overview](#overview)
+- [CSV (Comma-Separated Values)](#csv-comma-separated-values)
+  - [RFC 4180 Compliance](#rfc-4180-compliance)
+  - [Quick Start](#quick-start)
+  - [Options](#options)
+  - [Examples](#examples)
+- [YAML (YAML Ain't Markup Language)](#yaml-yaml-aint-markup-language)
+  - [RFC 9512 Compliance (YAML 1.2.2)](#rfc-9512-compliance-yaml-122)
+  - [Quick Start](#quick-start-1)
+  - [Data Types](#data-types)
+  - [Advanced Features](#advanced-features)
+    - [Block Scalars with Chomping Indicators](#block-scalars-with-chomping-indicators)
+    - [Explicit Type Tags](#explicit-type-tags)
+    - [Specialized Type Tags (YAML 1.2.2)](#specialized-type-tags-yaml-122)
+    - [Merge Keys (<<)](#merge-keys-)
+    - [Multiple Documents](#multiple-documents)
+    - [Anchors and Aliases](#anchors-and-aliases)
+    - [Unicode Escapes](#unicode-escapes)
+    - [Explicit Keys](#explicit-keys)
+    - [Directives](#directives)
+    - [JSON Compatibility](#json-compatibility)
+  - [Functions](#functions)
+- [XML (Extensible Markup Language)](#xml-extensible-markup-language)
+  - [Quick Start](#quick-start-2)
+  - [XML Structure](#xml-structure)
+  - [Examples](#examples-1)
+  - [Common Patterns](#common-patterns)
+    - [Configuration Files](#configuration-files)
+    - [Data Export](#data-export)
+    - [Data Conversion](#data-conversion)
+- [Performance Considerations](#performance-considerations)
+- [Error Handling](#error-handling)
+- [Comparison: When to Use Each Format](#comparison-when-to-use-each-format)
+- [See Also](#see-also)
 
 CupidScript provides built-in support for three widely-used data formats: CSV, YAML, and XML. These formats enable easy data interchange, configuration management, and structured data processing.
 

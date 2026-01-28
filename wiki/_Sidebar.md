@@ -1,3 +1,4 @@
+
 ## CupidScript Wiki
 
 **[Home](Home)**
@@ -17,6 +18,8 @@
 * [Async & Await](Async-Await)
 * [Background Event Loop (Linux)](Event-Loop)
 * [Collections (list/map)](Collections)
+* [Comprehensions](COMPREHENSIONS)
+* [Tuples](TUPLES)
 * [Strings & strbuf](Strings-and-Strbuf)
 * [Regex](Regex)
 * [Date & Time](Date-Time)

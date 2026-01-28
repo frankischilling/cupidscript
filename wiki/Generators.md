@@ -1,4 +1,11 @@
+
 # Generators
+
+## Table of Contents
+
+- [Syntax](#syntax)
+- [Semantics](#semantics)
+- [Errors](#errors)
 
 ## Table of Contents
 

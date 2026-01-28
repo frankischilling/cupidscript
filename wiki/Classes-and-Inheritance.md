@@ -1,4 +1,12 @@
+
 # Classes & Inheritance
+
+## Table of Contents
+
+- [Defining Classes](#defining-classes)
+- [Creating Instances](#creating-instances)
+- [Inheritance](#inheritance)
+- [Method Calls](#method-calls)
 
 ## Table of Contents
 

@@ -4,6 +4,7 @@
 
 - [Comments](#comments)
 - [Tokens](#tokens)
+- [List & Map Literals and Comprehensions](#list-literals)
 - [Functions](#functions)
 - [Arrow Functions](#arrow-functions)
 - [Spread & Rest](#spread--rest)
@@ -133,6 +134,15 @@ Trailing commas are allowed:
 []
 ```
 
+**List Comprehensions:**
+
+```c
+[x * x for x in range(10)]
+[x for x in items if x > 0]
+```
+
+See [Comprehensions](COMPREHENSIONS) for details.
+
 ### Map Literals
 
 ```c
@@ -147,6 +157,15 @@ Trailing commas are allowed:
 {"a": 1, "b": 2,}
 {}
 ```
+
+**Map Comprehensions:**
+
+```c
+{k: v * 2 for k, v in data}
+{i: i * i for i in range(5)}
+```
+
+See [Comprehensions](COMPREHENSIONS) for details.
 
 Keys are expressions (any value is allowed). For convenience, an identifier before `:` is treated as a string key.
 

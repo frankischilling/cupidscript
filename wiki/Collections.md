@@ -5,6 +5,7 @@
 - [Lists](#lists)
 - [Maps](#maps)
 - [Sets](#sets)
+- [Comprehensions](#comprehensions)
 - [Destructuring](#destructuring)
 - [Data Quality-of-Life Functions](#data-quality-of-life-functions)
 
@@ -142,6 +143,69 @@ let config = {...defaults, size: 14};
 ```
 
 ### Set / Get
+
+## Comprehensions
+
+CupidScript supports **list and map comprehensions** for concise collection creation:
+
+### List Comprehensions
+
+Transform and filter iterables in a single expression:
+
+```c
+// Basic syntax: [expression for variable in iterable]
+let squares = [x * x for x in range(10)]
+// [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
+
+// With filter: [expression for variable in iterable if condition]
+let evens = [x for x in range(20) if x % 2 == 0]
+// [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
+
+// From lists
+let words = ["hello", "world", "cupid"]
+let uppercase = [w.upper() for w in words]
+// ["HELLO", "WORLD", "CUPID"]
+
+// From maps
+let data = {a: 1, b: 2, c: 3}
+let pairs = [k + ":" + str(v) for k, v in data]
+// ["a:1", "b:2", "c:3"]
+```
+
+### Map Comprehensions
+
+Create or transform maps:
+
+```c
+// Basic syntax: {key_expr: value_expr for key_var, value_var in iterable}
+let numbers = {a: 1, b: 2, c: 3}
+let doubled = {k: v * 2 for k, v in numbers}
+// {a: 2, b: 4, c: 6}
+
+// With filter
+let high_values = {k: v for k, v in numbers if v > 1}
+// {b: 2, c: 3}
+
+// From list to map
+let fruits = ["apple", "banana", "cherry"]
+let indexed = {i: fruit for i, fruit in fruits}
+// {0: "apple", 1: "banana", 2: "cherry"}
+```
+
+### Nested Comprehensions
+
+Create multi-dimensional structures:
+
+```c
+// Multiplication table
+let table = [[i * j for j in range(1, 6)] for i in range(1, 6)]
+
+// Coordinate pairs
+let coords = [(x, y) for x in range(3) for y in range(3)]
+// [(0,0), (0,1), (0,2), (1,0), ...]
+```
+
+**See [Comprehensions](COMPREHENSIONS.md) for complete documentation.**
 
 ## Destructuring
 

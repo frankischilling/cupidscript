@@ -1,4 +1,13 @@
+
 # Structs
+
+## Table of Contents
+
+- [Syntax](#syntax)
+- [Fields and Defaults](#fields-and-defaults)
+- [Construction Rules](#construction-rules)
+- [Field Access](#field-access)
+- [Notes](#notes)
 
 ## Table of Contents
 
