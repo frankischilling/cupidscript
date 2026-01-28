@@ -1,3 +1,5 @@
+// ...existing code (remove the compile_let function that starts at line 3)...
+
 #include "cs_vm.h"
 #include "cs_event_loop.h"
 #include <stdlib.h>
@@ -5565,6 +5567,9 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
             if (!loopenv) { cs_value_release(it); vm_set_err(vm, "out of memory", s->source_name, s->line, s->col); r.ok = 0; return r; }
 
             env_set_here(loopenv, s->as.forin_stmt.name, cs_nil());
+            if (s->as.forin_stmt.name2) {
+                env_set_here(loopenv, s->as.forin_stmt.name2, cs_nil());
+            }
 
             if (it.type == CS_T_LIST) {
                 cs_list_obj* l = as_list(it);
@@ -5572,6 +5577,13 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                     cs_value v = cs_value_copy(l->items[i]);
                     env_set_here(loopenv, s->as.forin_stmt.name, v);
                     cs_value_release(v);
+
+                    // If name2 is present, bind it to the index
+                    if (s->as.forin_stmt.name2) {
+                        cs_value idx = cs_int((int64_t)i);
+                        env_set_here(loopenv, s->as.forin_stmt.name2, idx);
+                        cs_value_release(idx);
+                    }
 
                     r = exec_stmt(vm, loopenv, s->as.forin_stmt.body);
                     if (!r.ok || r.did_return || r.did_throw) break;
@@ -5586,6 +5598,13 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                     env_set_here(loopenv, s->as.forin_stmt.name, keyv);
                     cs_value_release(keyv);
 
+                    // If name2 is present, bind it to the value
+                    if (s->as.forin_stmt.name2) {
+                        cs_value valv = cs_value_copy(m->entries[i].val);
+                        env_set_here(loopenv, s->as.forin_stmt.name2, valv);
+                        cs_value_release(valv);
+                    }
+
                     r = exec_stmt(vm, loopenv, s->as.forin_stmt.body);
                     if (!r.ok || r.did_return || r.did_throw) break;
                     if (r.did_break) { r.did_break = 0; break; }
@@ -5593,11 +5612,21 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                 }
             } else if (it.type == CS_T_SET) {
                 cs_map_obj* m = as_map(it);
+                size_t iteration_count = 0;
                 for (size_t i = 0; m && i < m->cap; i++) {
                     if (!m->entries[i].in_use) continue;
                     cs_value keyv = cs_value_copy(m->entries[i].key);
                     env_set_here(loopenv, s->as.forin_stmt.name, keyv);
                     cs_value_release(keyv);
+
+                    // If name2 is present, bind it to the iteration count
+                    if (s->as.forin_stmt.name2) {
+                        cs_value count_val = cs_int((int64_t)iteration_count);
+                        env_set_here(loopenv, s->as.forin_stmt.name2, count_val);
+                        cs_value_release(count_val);
+                    }
+
+                    iteration_count++;
 
                     r = exec_stmt(vm, loopenv, s->as.forin_stmt.body);
                     if (!r.ok || r.did_return || r.did_throw) break;
@@ -5610,10 +5639,20 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                     int64_t step = (rg->step == 0) ? ((rg->start <= rg->end) ? 1 : -1) : rg->step;
                     if (step > 0) {
                         int64_t limit = rg->inclusive ? rg->end : (rg->end - 1);
+                        size_t iteration_count = 0;
                         for (int64_t i = rg->start; i <= limit; i += step) {
                             cs_value v = cs_int(i);
                             env_set_here(loopenv, s->as.forin_stmt.name, v);
                             cs_value_release(v);
+
+                            // If name2 is present, bind it to the iteration count
+                            if (s->as.forin_stmt.name2) {
+                                cs_value count_val = cs_int((int64_t)iteration_count);
+                                env_set_here(loopenv, s->as.forin_stmt.name2, count_val);
+                                cs_value_release(count_val);
+                            }
+
+                            iteration_count++;
 
                             r = exec_stmt(vm, loopenv, s->as.forin_stmt.body);
                             if (!r.ok || r.did_return || r.did_throw) break;
@@ -5622,10 +5661,20 @@ static exec_result exec_stmt(cs_vm* vm, cs_env* env, ast* s) {
                         }
                     } else {
                         int64_t limit = rg->inclusive ? rg->end : (rg->end + 1);
+                        size_t iteration_count = 0;
                         for (int64_t i = rg->start; i >= limit; i += step) {
                             cs_value v = cs_int(i);
                             env_set_here(loopenv, s->as.forin_stmt.name, v);
                             cs_value_release(v);
+
+                            // If name2 is present, bind it to the iteration count
+                            if (s->as.forin_stmt.name2) {
+                                cs_value count_val = cs_int((int64_t)iteration_count);
+                                env_set_here(loopenv, s->as.forin_stmt.name2, count_val);
+                                cs_value_release(count_val);
+                            }
+
+                            iteration_count++;
 
                             r = exec_stmt(vm, loopenv, s->as.forin_stmt.body);
                             if (!r.ok || r.did_return || r.did_throw) break;

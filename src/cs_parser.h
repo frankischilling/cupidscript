@@ -82,7 +82,7 @@ struct ast {
             char** export_names;
             size_t count;
         } export_list;
-        struct { char* name; ast* iterable; ast* body; } forin_stmt;
+        struct { char* name; char* name2; ast* iterable; ast* body; } forin_stmt;
         struct { ast* init; ast* cond; ast* incr; ast* body; } for_c_style_stmt;
         struct { ast* value; } throw_stmt;
         struct { ast* try_b; char* catch_name; ast* catch_b; ast* finally_b; } try_stmt;
