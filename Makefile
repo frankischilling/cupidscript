@@ -47,7 +47,7 @@ endif
 
 .PHONY: all clean dirs test
 
-all: dirs $(LIB) $(BIN)
+all: dirs $(LIB) $(BIN) $(API_TEST_BIN)
 
 # Auto-generated header dependencies.
 # Note: These .d files don't exist on a fresh tree; the rules below will bootstrap them.
