@@ -1,5 +1,3 @@
-// ...existing code (remove the compile_let function that starts at line 3)...
-
 #include "cs_vm.h"
 #include "cs_event_loop.h"
 #include <stdlib.h>
@@ -2511,6 +2509,31 @@ static cs_value eval_binop(cs_vm* vm, ast* e, cs_value a, cs_value b, int* ok) {
     }
 
     if (op == TK_MINUS || op == TK_STAR || op == TK_SLASH || op == TK_PERCENT) {
+        // Check for set difference first
+        if (op == TK_MINUS && a.type == CS_T_SET && b.type == CS_T_SET) {
+            cs_value result = cs_set(vm);
+            if (!result.as.p) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+            cs_map_obj* r = as_map(result);
+            cs_map_obj* sa = as_map(a);
+            cs_map_obj* sb = as_map(b);
+            
+            // Add elements from a that are not in b
+            for (size_t i = 0; i < sa->cap; i++) {
+                if (!sa->entries[i].in_use) continue;
+                cs_value found = map_get_value(sb, sa->entries[i].key);
+                if (found.type == CS_T_NIL) {
+                    if (!map_set_value(r, sa->entries[i].key, cs_bool(1))) {
+                        cs_value_release(result);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                }
+            }
+            
+            return result;
+        }
+        
         if ((a.type == CS_T_INT || a.type == CS_T_FLOAT) && (b.type == CS_T_INT || b.type == CS_T_FLOAT)) {
             double av = (a.type == CS_T_INT) ? (double)a.as.i : a.as.f;
             double bv = (b.type == CS_T_INT) ? (double)b.as.i : b.as.f;
@@ -2591,6 +2614,113 @@ static cs_value eval_binop(cs_vm* vm, ast* e, cs_value a, cs_value b, int* ok) {
             return cs_bool(r);
         }
         vm_set_err(vm, "type error: comparisons require both ints/floats or both strings", e->source_name, e->line, e->col);
+        *ok = 0; return cs_nil();
+    }
+
+    // Set operations
+    if (op == TK_BAR) {  // Union: s1 | s2
+        if (a.type == CS_T_SET && b.type == CS_T_SET) {
+            cs_value result = cs_set(vm);
+            if (!result.as.p) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+            cs_map_obj* r = as_map(result);
+            cs_map_obj* sa = as_map(a);
+            cs_map_obj* sb = as_map(b);
+            
+            // Add all elements from set a
+            for (size_t i = 0; i < sa->cap; i++) {
+                if (!sa->entries[i].in_use) continue;
+                if (!map_set_value(r, sa->entries[i].key, cs_bool(1))) {
+                    cs_value_release(result);
+                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                    *ok = 0;
+                    return cs_nil();
+                }
+            }
+            
+            // Add all elements from set b
+            for (size_t i = 0; i < sb->cap; i++) {
+                if (!sb->entries[i].in_use) continue;
+                if (!map_set_value(r, sb->entries[i].key, cs_bool(1))) {
+                    cs_value_release(result);
+                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                    *ok = 0;
+                    return cs_nil();
+                }
+            }
+            
+            return result;
+        }
+        vm_set_err(vm, "type error: '|' expects two sets", e->source_name, e->line, e->col);
+        *ok = 0; return cs_nil();
+    }
+
+    if (op == TK_AMP) {  // Intersection: s1 & s2
+        if (a.type == CS_T_SET && b.type == CS_T_SET) {
+            cs_value result = cs_set(vm);
+            if (!result.as.p) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+            cs_map_obj* r = as_map(result);
+            cs_map_obj* sa = as_map(a);
+            cs_map_obj* sb = as_map(b);
+            
+            // Add elements that are in both sets
+            for (size_t i = 0; i < sa->cap; i++) {
+                if (!sa->entries[i].in_use) continue;
+                cs_value found = map_get_value(sb, sa->entries[i].key);
+                if (found.type != CS_T_NIL) {
+                    if (!map_set_value(r, sa->entries[i].key, cs_bool(1))) {
+                        cs_value_release(result);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                }
+            }
+            
+            return result;
+        }
+        vm_set_err(vm, "type error: '&' expects two sets", e->source_name, e->line, e->col);
+        *ok = 0; return cs_nil();
+    }
+
+    if (op == TK_CARET) {  // Symmetric difference: s1 ^ s2 (elements in either but not both)
+        if (a.type == CS_T_SET && b.type == CS_T_SET) {
+            cs_value result = cs_set(vm);
+            if (!result.as.p) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+            cs_map_obj* r = as_map(result);
+            cs_map_obj* sa = as_map(a);
+            cs_map_obj* sb = as_map(b);
+            
+            // Add elements from a that are not in b
+            for (size_t i = 0; i < sa->cap; i++) {
+                if (!sa->entries[i].in_use) continue;
+                cs_value found = map_get_value(sb, sa->entries[i].key);
+                if (found.type == CS_T_NIL) {
+                    if (!map_set_value(r, sa->entries[i].key, cs_bool(1))) {
+                        cs_value_release(result);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                }
+            }
+            
+            // Add elements from b that are not in a
+            for (size_t i = 0; i < sb->cap; i++) {
+                if (!sb->entries[i].in_use) continue;
+                cs_value found = map_get_value(sa, sb->entries[i].key);
+                if (found.type == CS_T_NIL) {
+                    if (!map_set_value(r, sb->entries[i].key, cs_bool(1))) {
+                        cs_value_release(result);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                }
+            }
+            
+            return result;
+        }
+        vm_set_err(vm, "type error: '^' expects two sets", e->source_name, e->line, e->col);
         *ok = 0; return cs_nil();
     }
 
@@ -3796,6 +3926,66 @@ struct_done:
             return result;
         }
 
+        case N_SETLIT: {
+            cs_value sv = cs_set(vm);
+            if (!sv.as.p) { vm_set_err(vm, "out of memory", e->source_name, e->line, e->col); *ok = 0; return cs_nil(); }
+            cs_map_obj* s = as_map(sv);
+            for (size_t i = 0; i < e->as.setlit.count; i++) {
+                ast* item = e->as.setlit.items[i];
+                if (item && item->type == N_SPREAD) {
+                    cs_value spread = eval_expr(vm, env, item->as.spread.expr, ok);
+                    if (!*ok) { cs_value_release(sv); return cs_nil(); }
+                    if (spread.type == CS_T_NIL) {
+                        cs_value_release(spread);
+                        continue;
+                    }
+                    if (spread.type == CS_T_SET) {
+                        cs_map_obj* ss = as_map(spread);
+                        for (size_t j = 0; j < ss->cap; j++) {
+                            if (!ss->entries[j].in_use) continue;
+                            if (!map_set_value(s, ss->entries[j].key, cs_bool(1))) {
+                                cs_value_release(spread);
+                                cs_value_release(sv);
+                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                *ok = 0;
+                                return cs_nil();
+                            }
+                        }
+                    } else if (spread.type == CS_T_LIST) {
+                        cs_list_obj* ls = as_list(spread);
+                        for (size_t j = 0; j < ls->len; j++) {
+                            if (!map_set_value(s, ls->items[j], cs_bool(1))) {
+                                cs_value_release(spread);
+                                cs_value_release(sv);
+                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                *ok = 0;
+                                return cs_nil();
+                            }
+                        }
+                    } else {
+                        cs_value_release(spread);
+                        cs_value_release(sv);
+                        vm_set_err(vm, "spread in set expects set or list", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                    cs_value_release(spread);
+                } else {
+                    cs_value v = eval_expr(vm, env, item, ok);
+                    if (!*ok) { cs_value_release(sv); return cs_nil(); }
+                    if (!map_set_value(s, v, cs_bool(1))) {
+                        cs_value_release(v);
+                        cs_value_release(sv);
+                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                        *ok = 0;
+                        return cs_nil();
+                    }
+                    cs_value_release(v);
+                }
+            }
+            return sv;
+        }
+
         case N_INDEX: {
             cs_value target = eval_expr(vm, env, e->as.index.target, ok);
             if (!*ok) return cs_nil();
@@ -4049,6 +4239,207 @@ struct_done:
                             *ok = 0;
                         }
 strbuf_done:
+                    } else if (self.type == CS_T_STR) {
+                        // String methods: repeat, split, etc.
+                        cs_string* str = as_str(self);
+                        if (strcmp(field, "repeat") == 0) {
+                            if (argc0 != 1 || argv0[0].type != CS_T_INT) {
+                                vm_set_err(vm, "string.repeat expects 1 integer argument", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                int64_t count = argv0[0].as.i;
+                                if (count < 0) count = 0;
+                                if (count == 0) {
+                                    out = cs_str(vm, "");
+                                } else if (count == 1) {
+                                    out = cs_value_copy(self);
+                                } else {
+                                    size_t total_len = str->len * (size_t)count;
+                                    char* repeated = (char*)malloc(total_len + 1);
+                                    if (!repeated) {
+                                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                    } else {
+                                        for (int64_t i = 0; i < count; i++) {
+                                            memcpy(repeated + (str->len * (size_t)i), str->data, str->len);
+                                        }
+                                        repeated[total_len] = 0;
+                                        out = cs_str_take(vm, repeated, total_len);
+                                    }
+                                }
+                            }
+                        } else if (strcmp(field, "lower") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "string.lower expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                char* lowered = (char*)malloc(str->len + 1);
+                                if (!lowered) {
+                                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                    *ok = 0;
+                                } else {
+                                    for (size_t i = 0; i < str->len; i++) {
+                                        lowered[i] = (char)tolower((unsigned char)str->data[i]);
+                                    }
+                                    lowered[str->len] = 0;
+                                    out = cs_str_take(vm, lowered, str->len);
+                                }
+                            }
+                        } else if (strcmp(field, "upper") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "string.upper expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                char* uppered = (char*)malloc(str->len + 1);
+                                if (!uppered) {
+                                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                    *ok = 0;
+                                } else {
+                                    for (size_t i = 0; i < str->len; i++) {
+                                        uppered[i] = (char)toupper((unsigned char)str->data[i]);
+                                    }
+                                    uppered[str->len] = 0;
+                                    out = cs_str_take(vm, uppered, str->len);
+                                }
+                            }
+                        } else if (strcmp(field, "split") == 0) {
+                            if (argc0 != 1 || argv0[0].type != CS_T_STR) {
+                                vm_set_err(vm, "string.split expects 1 string argument", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                cs_string* sep = as_str(argv0[0]);
+                                if (sep->len == 0) {
+                                    // Empty separator: return list with single element (the string itself)
+                                    out = cs_list(vm);
+                                    if (!out.as.p) {
+                                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                    } else {
+                                        cs_list_obj* l = as_list(out);
+                                        if (!list_push(l, cs_value_copy(self))) {
+                                            cs_value_release(out);
+                                            vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                            *ok = 0;
+                                        }
+                                    }
+                                } else {
+                                    // Split by separator
+                                    out = cs_list(vm);
+                                    if (!out.as.p) {
+                                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                    } else {
+                                        cs_list_obj* l = as_list(out);
+                                        const char* p = str->data;
+                                        const char* end = str->data + str->len;
+                                        while (p < end) {
+                                            const char* hit = strstr(p, sep->data);
+                                            if (!hit || hit >= end) {
+                                                // Last part
+                                                size_t n = (size_t)(end - p);
+                                                char* part = (char*)malloc(n + 1);
+                                                if (!part) {
+                                                    cs_value_release(out);
+                                                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                                    *ok = 0;
+                                                    break;
+                                                }
+                                                memcpy(part, p, n);
+                                                part[n] = 0;
+                                                cs_value sv = cs_str_take(vm, part, n);
+                                                if (!list_push(l, sv)) {
+                                                    cs_value_release(sv);
+                                                    cs_value_release(out);
+                                                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                                    *ok = 0;
+                                                }
+                                                break;
+                                            }
+                                            // Found separator
+                                            size_t n = (size_t)(hit - p);
+                                            char* part = (char*)malloc(n + 1);
+                                            if (!part) {
+                                                cs_value_release(out);
+                                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                                *ok = 0;
+                                                break;
+                                            }
+                                            memcpy(part, p, n);
+                                            part[n] = 0;
+                                            cs_value sv = cs_str_take(vm, part, n);
+                                            if (!list_push(l, sv)) {
+                                                cs_value_release(sv);
+                                                cs_value_release(out);
+                                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                                *ok = 0;
+                                                break;
+                                            }
+                                            p = hit + sep->len;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            vm_set_err(vm, "unknown string method", e->source_name, e->line, e->col);
+                            *ok = 0;
+                        }
+                    } else if (self.type == CS_T_SET) {
+                        // Set methods: add, remove, contains
+                        if (strcmp(field, "add") == 0) {
+                            if (argc0 != 1) {
+                                vm_set_err(vm, "set.add expects 1 argument", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                int has = cs_map_has_value(self, argv0[0]);
+                                if (!has) {
+                                    if (cs_map_set_value(self, argv0[0], cs_bool(1)) != 0) {
+                                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                    }
+                                }
+                                out = cs_bool(!has);
+                            }
+                        } else if (strcmp(field, "remove") == 0) {
+                            if (argc0 != 1) {
+                                vm_set_err(vm, "set.remove expects 1 argument", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                out = cs_bool(cs_map_del_value(self, argv0[0]) == 0);
+                            }
+                        } else if (strcmp(field, "contains") == 0) {
+                            if (argc0 != 1) {
+                                vm_set_err(vm, "set.contains expects 1 argument", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                out = cs_bool(cs_map_has_value(self, argv0[0]) != 0);
+                            }
+                        } else if (strcmp(field, "clear") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "set.clear expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                cs_map_obj* s = as_map(self);
+                                for (size_t i = 0; i < s->cap; i++) {
+                                    if (s->entries[i].in_use) {
+                                        cs_value_release(s->entries[i].key);
+                                        cs_value_release(s->entries[i].val);
+                                        s->entries[i].in_use = 0;
+                                    }
+                                }
+                                s->len = 0;
+                                out = cs_nil();
+                            }
+                        } else if (strcmp(field, "size") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "set.size expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                out = cs_int((int64_t)as_map(self)->len);
+                            }
+                        } else {
+                            vm_set_err(vm, "unknown set method", e->source_name, e->line, e->col);
+                            *ok = 0;
+                        }
                     } else if (self.type == CS_T_MAP) {
                         cs_value f = cs_nil();
                         cs_value owner_class = cs_nil();
@@ -4274,6 +4665,166 @@ strbuf_done:
                             *ok = 0;
                         }
 strbuf_done_opt:
+                    } else if (self.type == CS_T_STR) {
+                        // String methods for optional chaining
+                        cs_string* str = as_str(self);
+                        if (strcmp(field, "repeat") == 0) {
+                            if (argc0 != 1 || argv0[0].type != CS_T_INT) {
+                                vm_set_err(vm, "string.repeat expects 1 integer argument", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                int64_t count = argv0[0].as.i;
+                                if (count < 0) count = 0;
+                                if (count == 0) {
+                                    out = cs_str(vm, "");
+                                } else if (count == 1) {
+                                    out = cs_value_copy(self);
+                                } else {
+                                    size_t total_len = str->len * (size_t)count;
+                                    char* repeated = (char*)malloc(total_len + 1);
+                                    if (!repeated) {
+                                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                    } else {
+                                        for (int64_t i = 0; i < count; i++) {
+                                            memcpy(repeated + (str->len * (size_t)i), str->data, str->len);
+                                        }
+                                        repeated[total_len] = 0;
+                                        out = cs_str_take(vm, repeated, total_len);
+                                    }
+                                }
+                            }
+                        } else if (strcmp(field, "lower") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "string.lower expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                char* lowered = (char*)malloc(str->len + 1);
+                                if (!lowered) {
+                                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                    *ok = 0;
+                                } else {
+                                    for (size_t i = 0; i < str->len; i++) {
+                                        lowered[i] = (char)tolower((unsigned char)str->data[i]);
+                                    }
+                                    lowered[str->len] = 0;
+                                    out = cs_str_take(vm, lowered, str->len);
+                                }
+                            }
+                        } else if (strcmp(field, "upper") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "string.upper expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                char* uppered = (char*)malloc(str->len + 1);
+                                if (!uppered) {
+                                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                    *ok = 0;
+                                } else {
+                                    for (size_t i = 0; i < str->len; i++) {
+                                        uppered[i] = (char)toupper((unsigned char)str->data[i]);
+                                    }
+                                    uppered[str->len] = 0;
+                                    out = cs_str_take(vm, uppered, str->len);
+                                }
+                            }
+                        } else if (strcmp(field, "split") == 0) {
+                            if (argc0 != 1 || argv0[0].type != CS_T_STR) {
+                                vm_set_err(vm, "string.split expects 1 string argument", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                cs_string* sep = as_str(argv0[0]);
+                                if (sep->len == 0) {
+                                    out = cs_list(vm);
+                                    if (!out.as.p) {
+                                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                    } else {
+                                        cs_list_obj* l = as_list(out);
+                                        if (!list_push(l, cs_value_copy(self))) {
+                                            cs_value_release(out);
+                                            vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                            *ok = 0;
+                                        }
+                                    }
+                                } else {
+                                    out = cs_list(vm);
+                                    if (!out.as.p) {
+                                        vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                        *ok = 0;
+                                    } else {
+                                        cs_list_obj* l = as_list(out);
+                                        const char* p = str->data;
+                                        const char* end = str->data + str->len;
+                                        while (p < end) {
+                                            const char* hit = strstr(p, sep->data);
+                                            if (!hit || hit >= end) {
+                                                size_t n = (size_t)(end - p);
+                                                char* part = (char*)malloc(n + 1);
+                                                if (!part) {
+                                                    cs_value_release(out);
+                                                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                                    *ok = 0;
+                                                    break;
+                                                }
+                                                memcpy(part, p, n);
+                                                part[n] = 0;
+                                                cs_value sv = cs_str_take(vm, part, n);
+                                                if (!list_push(l, sv)) {
+                                                    cs_value_release(sv);
+                                                    cs_value_release(out);
+                                                    vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                                    *ok = 0;
+                                                }
+                                                break;
+                                            }
+                                            size_t n = (size_t)(hit - p);
+                                            char* part = (char*)malloc(n + 1);
+                                            if (!part) {
+                                                cs_value_release(out);
+                                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                                *ok = 0;
+                                                break;
+                                            }
+                                            memcpy(part, p, n);
+                                            part[n] = 0;
+                                            cs_value sv = cs_str_take(vm, part, n);
+                                            if (!list_push(l, sv)) {
+                                                cs_value_release(sv);
+                                                cs_value_release(out);
+                                                vm_set_err(vm, "out of memory", e->source_name, e->line, e->col);
+                                                *ok = 0;
+                                                break;
+                                            }
+                                            p = hit + sep->len;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            vm_set_err(vm, "unknown string method", e->source_name, e->line, e->col);
+                            *ok = 0;
+                        }
+                    } else if (self.type == CS_T_SET) {
+                        // Set methods for optional chaining
+                        if (strcmp(field, "contains") == 0) {
+                            if (argc0 != 1) {
+                                vm_set_err(vm, "set.contains expects 1 argument", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                out = cs_bool(cs_map_has_value(self, argv0[0]) != 0);
+                            }
+                        } else if (strcmp(field, "size") == 0) {
+                            if (argc0 != 0) {
+                                vm_set_err(vm, "set.size expects 0 arguments", e->source_name, e->line, e->col);
+                                *ok = 0;
+                            } else {
+                                out = cs_int((int64_t)as_map(self)->len);
+                            }
+                        } else {
+                            vm_set_err(vm, "unknown set method", e->source_name, e->line, e->col);
+                            *ok = 0;
+                        }
                     } else if (self.type == CS_T_MAP) {
                         cs_value f = cs_nil();
                         cs_value owner_class = cs_nil();

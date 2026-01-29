@@ -9568,6 +9568,7 @@ static int nf_event_loop_running(cs_vm* vm, void* ud, int argc, const cs_value* 
 
 void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "print",  nf_print,  NULL);
+    cs_register_native(vm, "println",  nf_print,  NULL);  // alias for print (already adds newline)
     cs_register_native(vm, "typeof", nf_typeof, NULL);
     cs_register_native(vm, "getenv", nf_getenv, NULL);
     cs_register_native(vm, "assert", nf_assert, NULL);

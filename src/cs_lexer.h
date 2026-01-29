@@ -58,6 +58,7 @@ typedef enum {
     TK_LPAREN, TK_RPAREN,
     TK_LBRACKET, TK_RBRACKET,
     TK_LBRACE, TK_RBRACE,
+    TK_HASH_LBRACE, // #{
     TK_COMMA,
     TK_SEMI,
     TK_DOT,
@@ -77,6 +78,9 @@ typedef enum {
     TK_LT, TK_LE,
     TK_GT, TK_GE,
     TK_ANDAND, TK_OROR,
+    TK_AMP,        // &
+    TK_BAR,        // |
+    TK_CARET,      // ^
     TK_ARROW,      // =>
     TK_PIPE,       // |>
     TK_PLACEHOLDER, // _

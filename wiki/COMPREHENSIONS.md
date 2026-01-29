@@ -1,6 +1,6 @@
 # Comprehensions
 
-Comprehensions provide a concise, readable syntax for creating lists and maps by transforming and filtering existing collections. They bring functional programming elegance to CupidScript with a familiar Python-like syntax.
+Comprehensions provide a concise, readable syntax for creating lists, maps, and sets by transforming and filtering existing collections. They bring functional programming elegance to CupidScript with a familiar Python-like syntax.
 
 > ⚠️ **IMPORTANT: List Iteration Variable Order**
 > 
@@ -32,6 +32,10 @@ Comprehensions provide a concise, readable syntax for creating lists and maps by
   - [Basic Map Comprehensions](#basic-map-comprehensions)
   - [Transforming Maps](#transforming-maps)
   - [Creating Maps from Lists](#creating-maps-from-lists)
+- [Set Comprehensions](#set-comprehensions)
+  - [Basic Set Comprehensions](#basic-set-comprehensions)
+  - [Filtering with Sets](#filtering-with-sets)
+  - [From Different Iterables](#from-different-iterables-1)
 - [Nested Comprehensions](#nested-comprehensions)
 - [List Destructuring in Comprehensions](#list-destructuring-in-comprehensions)
   - [Basic Syntax](#basic-syntax-1)
@@ -306,6 +310,71 @@ let doubled_map = {k * 10: v * 2 for k, v in fruits_map if k > 0}
 // ✅ Transform both keys and values with filter
 let transformed = {k + 100: upper(v) for k, v in fruits_map if k > 0}
 // {101: "BANANA", 102: "CHERRY"}
+```
+
+## Set Comprehensions
+
+Set comprehensions create unique collections by automatically removing duplicates. They use the same syntax as list comprehensions but with `#{...}` instead of `[...]`.
+
+### Basic Set Comprehensions
+
+```cupidscript
+// General form:
+// #{expression for variable in iterable}
+
+let squares = #{x * x for x in range(10)}
+// #{0, 1, 4, 9, 16, 25, 36, 49, 64, 81}
+
+let evens = #{x for x in range(20) if x % 2 == 0}
+// #{0, 2, 4, 6, 8, 10, 12, 14, 16, 18}
+
+// Duplicates are automatically removed
+let digits = #{x % 10 for x in range(25)}
+// #{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+```
+
+### Filtering with Sets
+
+```cupidscript
+// With filter condition
+let positive_evens = #{x for x in range(-10, 11) if x > 0 && x % 2 == 0}
+// #{2, 4, 6, 8, 10}
+
+// Extract unique values
+let data = [1, 2, 2, 3, 3, 3, 4, 4, 4, 4]
+let unique = #{x for x in data}
+// #{1, 2, 3, 4}
+
+// Filter and transform
+let lengths = #{len(word) for word in ["hi", "hello", "hey", "world"]}
+// #{2, 3, 5}
+```
+
+### From Different Iterables
+
+```cupidscript
+// From lists
+let words = ["apple", "banana", "cherry", "apple"]
+let unique_upper = #{upper(w) for w in words}
+// #{APPLE, BANANA, CHERRY}
+
+// From maps (iterates over keys)
+let data = {a: 1, b: 2, c: 3}
+let key_set = #{k for k in data}
+// #{a, b, c}
+
+// From map key-value pairs
+let value_set = #{v for k, v in data}
+// #{1, 2, 3}
+
+// From ranges
+let multiples_of_3 = #{x for x in range(1, 31) if x % 3 == 0}
+// #{3, 6, 9, 12, 15, 18, 21, 24, 27, 30}
+
+// From sets (transform unique values)
+let s = #{1, 2, 3, 4, 5}
+let doubled = #{x * 2 for x in s}
+// #{2, 4, 6, 8, 10}
 ```
 
 ## Nested Comprehensions
@@ -928,6 +997,8 @@ See the [examples directory](../examples/):
 - [comprehensions_multi_iterator.cs](../examples/comprehensions_multi_iterator.cs) - Multiple iterator patterns and use cases
 - [comprehensions_complex_keys.cs](../examples/comprehensions_complex_keys.cs) - Complex key expressions in map comprehensions
 - [comprehensions_destructuring.cs](../examples/comprehensions_destructuring.cs) - List destructuring patterns with enumerate()
+- [sets_demo.cs](../examples/sets_demo.cs) - Set literals, comprehensions, and operations
+- [sets_advanced.cs](../examples/sets_advanced.cs) - Real-world set use cases
 
 ## See Also
 

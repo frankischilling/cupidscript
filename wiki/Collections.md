@@ -306,17 +306,98 @@ for pair in items(data) {
 
 ## Sets
 
-Sets store unique values (based on `==`).
+Sets store unique values (based on `==`). CupidScript provides both function-based and literal syntax for working with sets.
 
 ### Create
 
 ```c
+// Function-based creation
 let s = set();
 let s2 = set([1, 2, 2, 3]); // duplicates ignored
 let s3 = set({a: 1, b: 2}); // keys from map
+
+// Set literals (recommended)
+let empty = #{};                  // empty set
+let nums = #{1, 2, 3};           // set with elements
+let mixed = #{"apple", 42, true}; // mixed types
+
+// Set comprehensions
+let squares = #{x * x for x in range(10)};
+let evens = #{x for x in range(20) if x % 2 == 0};
+let unique_lengths = #{len(word) for word in ["hello", "world", "hi"]};
 ```
 
-### Add / Has / Del
+### Spread
+
+Use `...` to expand sets or lists into set literals:
+
+```c
+let a = #{1, 2, 3};
+let b = #{0, ...a, 4};        // #{0, 1, 2, 3, 4}
+let list = [1, 2, 2, 3];
+let from_list = #{...list};   // #{1, 2, 3} - duplicates removed
+```
+
+### Methods
+
+Sets support method-style operations using dot syntax:
+
+```c
+let s = #{1, 2, 3};
+
+// Add element
+s.add(4);           // returns true if added, false if already present
+s.add(2);           // returns false (already exists)
+
+// Check membership
+s.contains(3);      // true
+s.contains(99);     // false
+
+// Remove element
+s.remove(2);        // returns true if removed, false if not found
+s.remove(99);       // returns false
+
+// Size
+let count = s.size();  // 3 (after removing 2)
+
+// Clear all elements
+s.clear();          // empties the set
+```
+
+### Set Operators
+
+CupidScript provides mathematical set operators for combining and comparing sets:
+
+```c
+let a = #{1, 2, 3, 4};
+let b = #{3, 4, 5, 6};
+
+// Union: all elements from both sets
+let union = a | b;           // #{1, 2, 3, 4, 5, 6}
+
+// Intersection: elements in both sets
+let inter = a & b;           // #{3, 4}
+
+// Difference: elements in a but not in b
+let diff = a - b;            // #{1, 2}
+
+// Symmetric difference: elements in either set but not both
+let sym_diff = a ^ b;        // #{1, 2, 5, 6}
+
+// Operators can be chained
+let result = a | b & #{4, 5}; // operators have standard precedence
+```
+
+**Operator Precedence (high to low):**
+- Intersection (`&`) - binds tightest
+- Symmetric difference (`^`)
+- Union (`|`)
+- Difference (`-`)
+- Logical operators (`&&`, `||`)
+
+### Function-Based Operations (Legacy)
+
+For compatibility, set operations are also available as functions:
 
 ```c
 set_add(s, 10);   // true if inserted
@@ -336,6 +417,10 @@ let xs = set_values(s); // list of values (order unspecified)
 for v in s {
   print(v);
 }
+
+// In comprehensions (recommended for transformations)
+let doubled = [v * 2 for v in s];
+let filtered = #{v for v in s if v > 10};
 ```
 
 Additional helpers for map iteration:

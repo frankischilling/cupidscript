@@ -5,6 +5,7 @@
 - [Comments](#comments)
 - [Tokens](#tokens)
 - [List & Map Literals and Comprehensions](#list-literals)
+- [Set Literals and Comprehensions](#set-literals)
 - [Functions](#functions)
 - [Arrow Functions](#arrow-functions)
 - [Spread & Rest](#spread--rest)
@@ -168,6 +169,51 @@ Trailing commas are allowed:
 See [Comprehensions](COMPREHENSIONS) for details.
 
 Keys are expressions (any value is allowed). For convenience, an identifier before `:` is treated as a string key.
+
+### Set Literals
+
+```c
+#{}
+#{1, 2, 3}
+#{"apple", "banana", "cherry"}
+```
+
+Trailing commas are allowed:
+
+```c
+#{1, 2, 3,}
+#{}
+```
+
+**Set Comprehensions:**
+
+```c
+#{x * x for x in range(10)}
+#{x for x in items if x > 0}
+```
+
+**Spread in Set Literals:**
+
+```c
+let a = #{1, 2, 3};
+let b = #{0, ...a, 4};        // #{0, 1, 2, 3, 4}
+let list = [1, 2, 2, 3];
+let from_list = #{...list};   // #{1, 2, 3}
+```
+
+**Set Operators:**
+
+```c
+let a = #{1, 2, 3};
+let b = #{2, 3, 4};
+
+a | b   // union: #{1, 2, 3, 4}
+a & b   // intersection: #{2, 3}
+a - b   // difference: #{1}
+a ^ b   // symmetric difference: #{1, 4}
+```
+
+See [Collections](Collections#sets) for complete set documentation.
 
 ## Functions
 
@@ -336,6 +382,14 @@ Boolean:
 
 * `&& ||`
 
+Bitwise / Set Operations:
+
+* `&` (bitwise AND / set intersection)
+* `|` (bitwise OR / set union)
+* `^` (bitwise XOR / set symmetric difference)
+
+Note: These operators work on sets when both operands are sets, otherwise they are reserved for future bitwise operations on integers.
+
 Nullish coalescing:
 
 * `??` (returns left operand if not `nil`, otherwise right)
@@ -403,7 +457,7 @@ if (user := find_user(id)) {
 
 ## Precedence (high to low)
 
-1. Primary: literals, identifiers, parenthesized `(expr)`, list literals `[...]`, map literals `{...}`
+1. Primary: literals, identifiers, parenthesized `(expr)`, list literals `[...]`, map literals `{...}`, set literals `#{...}`
 2. Postfix: calls `f(...)`, indexing `a[b]`, field access `a.b` (field access works after any expression, e.g. `(expr).field`)
 3. Unary: `!expr`, `-expr`
 4. Multiplicative: `* / %`
@@ -411,13 +465,17 @@ if (user := find_user(id)) {
 6. Range: `start..end`, `start..=end`
 7. Comparison: `< <= > >=`
 8. Equality: `== !=`
-9. AND: `&&`
-10. OR: `||`
-11. Nullish: `a ?? b`
-12. Ternary: `cond ? then : else`
-13. Python-style conditional (in comprehensions): `value_if_true if cond else value_if_false`
+9. Bitwise AND / Set Intersection: `&`
+10. Bitwise XOR / Set Symmetric Difference: `^`
+11. Bitwise OR / Set Union: `|`
+12. Logical AND: `&&`
+13. Logical OR: `||`
+14. Nullish: `a ?? b`
+15. Pipe: `value |> f()`
+16. Ternary: `cond ? then : else`
+17. Python-style conditional (in comprehensions): `value_if_true if cond else value_if_false`
 
-> **Note:** The Python-style `if-else` syntax (#13) is primarily supported in comprehension expressions. For general use, prefer the traditional ternary operator (#12).
+> **Note:** The Python-style `if-else` syntax (#17) is primarily supported in comprehension expressions. For general use, prefer the traditional ternary operator (#16).
 
 ### Optional chaining
 

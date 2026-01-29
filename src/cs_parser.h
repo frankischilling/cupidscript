@@ -15,7 +15,7 @@ typedef enum {
     N_IDENT, N_PLACEHOLDER,
     N_PATTERN_LIST, N_PATTERN_MAP, N_PATTERN_TYPE, N_PATTERN_WILDCARD,
     // Compound literals
-    N_LISTLIT, N_MAPLIT, N_TUPLELIT,
+    N_LISTLIT, N_MAPLIT, N_TUPLELIT, N_SETLIT,
     N_LISTCOMP, N_MAPCOMP, N_SETCOMP,
     // Operators
     N_BINOP, N_UNOP, N_TERNARY, N_PIPE,
@@ -140,6 +140,7 @@ struct ast {
         struct { ast* target; char* field; } getfield;
         struct { ast** items; size_t count; } listlit;
         struct { ast** keys; ast** vals; size_t count; } maplit;
+        struct { ast** items; size_t count; } setlit;
         struct { 
             char** field_names;
             ast** field_values;

@@ -79,8 +79,15 @@ Key equality uses the same rules as `==`:
 Unique collection of values (internally a hash set).
 
 * Values are unique by `==`
+* Literal syntax: `#{1, 2, 3}` or `#{}` for empty set
+* Set comprehensions: `#{x for x in list if condition}`
+* Spread operator: `#{...set}`, `#{...list}`
+* Methods: `.add(value)`, `.remove(value)`, `.contains(value)`, `.size()`, `.clear()`
+* Operators: `|` (union), `&` (intersection), `-` (difference), `^` (symmetric difference)
 * Iterable with `for x in set { ... }`
 * Order is not guaranteed
+
+See [Collections - Sets](Collections.md#sets) for complete documentation.
 
 ### `strbuf`
 

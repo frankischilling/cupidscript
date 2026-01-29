@@ -11,7 +11,7 @@ CupidScript is a small embeddable scripting language with:
 * A C lexer + recursive-descent parser
 * A tree-walking VM (interpreter)
 * Closures (function literals capture their environment)
-* Basic built-in types: `nil`, `bool`, `int`, `float`, `string`, `list`, `map`, `strbuf`, `range`, `promise`, `tuple`
+* Basic built-in types: `nil`, `bool`, `int`, `float`, `string`, `list`, `map`, `set`, `strbuf`, `range`, `promise`, `tuple`
 * Async/await with promises and a cooperative scheduler
 * Pattern matching (`match`) and `switch` with patterns
 * A practical standard library for scripts (printing, strings, collections, paths, regex, math, time, JSON)
@@ -37,10 +37,11 @@ print("sum:", add(xs[0], xs[1]));
 
 ### Expressions
 
-* Literals: `123`, `0xFF`, `1_000`, `3.14`, `1.5e-3`, `"hello"`, `true`, `false`, `nil`, `[1, 2, 3]`, `{"key": "value"}`
+* Literals: `123`, `0xFF`, `1_000`, `3.14`, `1.5e-3`, `"hello"`, `true`, `false`, `nil`, `[1, 2, 3]`, `{"key": "value"}`, `#{1, 2, 3}`
 * Arithmetic: `+ - * / %`
 * Comparisons: `< <= > >= == !=`
 * Boolean: `&& || !`
+* Set operations: `|` (union), `&` (intersection), `-` (difference), `^` (symmetric difference)
 * Range: `start..end` (exclusive), `start..=end` (inclusive)
 * Ternary: `cond ? then_val : else_val`
 * Walrus: `x := expr` (assigns and returns value)
@@ -49,7 +50,7 @@ print("sum:", add(xs[0], xs[1]));
 * Field access: `obj.field` (maps) + dotted global fallback
 * Function literals: `fn(a, b) { ... }`, `fn(a, b) => expr`
 * Defaults: `fn greet(name, greeting = "Hello") { ... }`
-* Spread: `[0, ...xs]`, `{...m1, ...m2}`, `f(...xs)`
+* Spread: `[0, ...xs]`, `{...m1, ...m2}`, `#{...set}`, `f(...xs)`
 * Pipe: `value |> f()` (supports `_` placeholder)
 
 ### Statements
@@ -84,7 +85,7 @@ print("sum:", add(xs[0], xs[1]));
 * [Comprehensions](COMPREHENSIONS)
 * [Async & Await](Async-Await)
 * [Background Event Loop (Linux)](Event-Loop)
-* [Collections (list/map)](Collections)
+* [Collections (list/map/set)](Collections)
 * [Strings & strbuf](Strings-and-Strbuf)
 * [Regex](Regex)
 * [Date & Time](Date-Time)

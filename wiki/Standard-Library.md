@@ -380,6 +380,40 @@ Returns a list of `[key, value]` pairs.
 
 ## Set Ops
 
+CupidScript provides both modern literal syntax and legacy function-based operations for sets.
+
+### Modern Syntax (Recommended)
+
+```c
+// Create sets
+let s = #{1, 2, 3};
+let empty = #{};
+
+// Set comprehensions
+let evens = #{x for x in range(20) if x % 2 == 0};
+
+// Methods
+s.add(4);           // returns true if added
+s.contains(3);      // true
+s.remove(2);        // returns true if removed
+s.size();           // 3
+s.clear();          // empties the set
+
+// Operators
+let a = #{1, 2, 3};
+let b = #{2, 3, 4};
+a | b;  // union: #{1, 2, 3, 4}
+a & b;  // intersection: #{2, 3}
+a - b;  // difference: #{1}
+a ^ b;  // symmetric difference: #{1, 4}
+```
+
+See [Collections - Sets](Collections#sets) for complete documentation.
+
+### Legacy Functions
+
+These functions remain available for compatibility:
+
 ### `set_add(set, value) -> bool`
 
 Adds a value. Returns `true` if inserted, `false` if it was already present.
