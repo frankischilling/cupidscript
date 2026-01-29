@@ -8726,6 +8726,168 @@ static int nf_random(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_val
     return 0;
 }
 
+static int nf_clamp(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 3) { *out = cs_nil(); return 0; }
+    
+    double value = to_number(argv[0]);
+    double min_val = to_number(argv[1]);
+    double max_val = to_number(argv[2]);
+    
+    double result = value;
+    if (result < min_val) result = min_val;
+    if (result > max_val) result = max_val;
+    
+    // Return same type as input
+    if (argv[0].type == CS_T_INT && argv[1].type == CS_T_INT && argv[2].type == CS_T_INT) {
+        *out = cs_int((int64_t)result);
+    } else {
+        *out = cs_float(result);
+    }
+    return 0;
+}
+
+static int nf_trunc(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 1) { *out = cs_nil(); return 0; }
+    
+    double v = to_number(argv[0]);
+    *out = cs_int((int64_t)trunc(v));
+    return 0;
+}
+
+static int nf_asin(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || !is_number(argv[0])) { *out = cs_nil(); return 0; }
+    *out = cs_float(asin(to_number(argv[0])));
+    return 0;
+}
+
+static int nf_acos(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || !is_number(argv[0])) { *out = cs_nil(); return 0; }
+    *out = cs_float(acos(to_number(argv[0])));
+    return 0;
+}
+
+static int nf_atan(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || !is_number(argv[0])) { *out = cs_nil(); return 0; }
+    *out = cs_float(atan(to_number(argv[0])));
+    return 0;
+}
+
+static int nf_atan2(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || !is_number(argv[0]) || !is_number(argv[1])) { 
+        *out = cs_nil(); 
+        return 0; 
+    }
+    double y = to_number(argv[0]);
+    double x = to_number(argv[1]);
+    *out = cs_float(atan2(y, x));
+    return 0;
+}
+
+static int nf_log10(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || !is_number(argv[0])) { *out = cs_nil(); return 0; }
+    *out = cs_float(log10(to_number(argv[0])));
+    return 0;
+}
+
+static int nf_log2(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || !is_number(argv[0])) { *out = cs_nil(); return 0; }
+    *out = cs_float(log2(to_number(argv[0])));
+    return 0;
+}
+
+static int nf_random_int(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)vm; (void)ud;
+    if (!out) return 0;
+    if (argc != 2 || !is_number(argv[0]) || !is_number(argv[1])) { 
+        *out = cs_nil(); 
+        return 0; 
+    }
+    
+    static int seeded = 0;
+    if (!seeded) { srand((unsigned int)time(NULL)); seeded = 1; }
+    
+    int64_t min_val = (int64_t)to_number(argv[0]);
+    int64_t max_val = (int64_t)to_number(argv[1]);
+    
+    if (min_val > max_val) {
+        int64_t temp = min_val;
+        min_val = max_val;
+        max_val = temp;
+    }
+    
+    int64_t range = max_val - min_val + 1;
+    int64_t result = min_val + (int64_t)(rand() % range);
+    *out = cs_int(result);
+    return 0;
+}
+
+static int nf_random_choice(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_LIST) { 
+        *out = cs_nil(); 
+        return 0; 
+    }
+    
+    cs_list_obj* list = (cs_list_obj*)argv[0].as.p;
+    if (list->len == 0) {
+        *out = cs_nil();
+        return 0;
+    }
+    
+    static int seeded = 0;
+    if (!seeded) { srand((unsigned int)time(NULL)); seeded = 1; }
+    
+    size_t idx = (size_t)(rand() % list->len);
+    *out = cs_value_copy(list->items[idx]);
+    return 0;
+}
+
+static int nf_shuffle(cs_vm* vm, void* ud, int argc, const cs_value* argv, cs_value* out) {
+    (void)ud;
+    if (!out) return 0;
+    if (argc != 1 || argv[0].type != CS_T_LIST) { 
+        *out = cs_nil(); 
+        return 0; 
+    }
+    
+    cs_list_obj* list = (cs_list_obj*)argv[0].as.p;
+    if (list->len <= 1) {
+        *out = cs_nil();
+        return 0;
+    }
+    
+    static int seeded = 0;
+    if (!seeded) { srand((unsigned int)time(NULL)); seeded = 1; }
+    
+    // Fisher-Yates shuffle
+    for (size_t i = list->len - 1; i > 0; i--) {
+        size_t j = (size_t)(rand() % (i + 1));
+        cs_value temp = list->items[i];
+        list->items[i] = list->items[j];
+        list->items[j] = temp;
+    }
+    
+    *out = cs_nil();
+    return 0;
+}
+
 // String ergonomics functions
 static int cs_value_equals(const cs_value* a, const cs_value* b);  // forward decl
 
@@ -9632,17 +9794,28 @@ void cs_register_stdlib(cs_vm* vm) {
     cs_register_native(vm, "abs",   nf_abs,   NULL);
     cs_register_native(vm, "min",   nf_min,   NULL);
     cs_register_native(vm, "max",   nf_max,   NULL);
+    cs_register_native(vm, "clamp", nf_clamp, NULL);
     cs_register_native(vm, "floor", nf_floor, NULL);
     cs_register_native(vm, "ceil",  nf_ceil,  NULL);
     cs_register_native(vm, "round", nf_round, NULL);
+    cs_register_native(vm, "trunc", nf_trunc, NULL);
     cs_register_native(vm, "sqrt",  nf_sqrt,  NULL);
     cs_register_native(vm, "pow",   nf_pow,   NULL);
+    cs_register_native(vm, "exp",   nf_exp,   NULL);
+    cs_register_native(vm, "log",   nf_log,   NULL);
+    cs_register_native(vm, "log10", nf_log10, NULL);
+    cs_register_native(vm, "log2",  nf_log2,  NULL);
     cs_register_native(vm, "sin",   nf_sin,   NULL);
     cs_register_native(vm, "cos",   nf_cos,   NULL);
     cs_register_native(vm, "tan",   nf_tan,   NULL);
-    cs_register_native(vm, "log",   nf_log,   NULL);
-    cs_register_native(vm, "exp",   nf_exp,   NULL);
+    cs_register_native(vm, "asin",  nf_asin,  NULL);
+    cs_register_native(vm, "acos",  nf_acos,  NULL);
+    cs_register_native(vm, "atan",  nf_atan,  NULL);
+    cs_register_native(vm, "atan2", nf_atan2, NULL);
     cs_register_native(vm, "random", nf_random, NULL);
+    cs_register_native(vm, "random_int", nf_random_int, NULL);
+    cs_register_native(vm, "random_choice", nf_random_choice, NULL);
+    cs_register_native(vm, "shuffle", nf_shuffle, NULL);
 
     // Math constants
     cs_register_global(vm, "PI", cs_float(3.14159265358979323846));

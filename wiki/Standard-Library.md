@@ -1309,85 +1309,348 @@ Checks if a value is a promise.
 
 ## Math Functions
 
-### `abs(x) -> int | float`
+CupidScript provides a comprehensive set of mathematical functions for scientific computing, game development, and general numeric operations.
+
+### Basic Math
+
+#### `abs(x) -> int | float`
 
 Returns absolute value. Preserves type (int → int, float → float).
 
-### `min(...values) -> number`
+```cs
+abs(-5)      // 5
+abs(-3.14)   // 3.14
+abs(42)      // 42
+```
 
-Returns minimum of one or more numbers. Accepts int and/or float.
+#### `min(...values) -> number`
 
-### `max(...values) -> number`
+Returns minimum of one or more values. Accepts any number of int and/or float arguments.
 
-Returns maximum of one or more numbers. Accepts int and/or float.
+```cs
+min(3, 7, 2)      // 2
+min(1.5, 2.5)     // 1.5
+min(-10, 0, 10)   // -10
+```
 
-### `floor(x) -> int`
+#### `max(...values) -> number`
+
+Returns maximum of one or more values. Accepts any number of int and/or float arguments.
+
+```cs
+max(3, 7, 2)      // 7
+max(1.5, 2.5)     // 2.5
+max(-10, 0, 10)   // 10
+```
+
+#### `clamp(value, min, max) -> number`
+
+Constrains a value to the range [min, max]. Returns int if all arguments are int, otherwise float.
+
+```cs
+clamp(5, 0, 10)    // 5
+clamp(-5, 0, 10)   // 0
+clamp(15, 0, 10)   // 10
+clamp(3.7, 0, 5)   // 3.7
+```
+
+### Rounding Functions
+
+#### `floor(x) -> int`
 
 Rounds down to nearest integer. Accepts int or float, always returns int.
 
-### `ceil(x) -> int`
+```cs
+floor(3.7)    // 3
+floor(-3.7)   // -4
+floor(5)      // 5
+```
+
+#### `ceil(x) -> int`
 
 Rounds up to nearest integer. Accepts int or float, always returns int.
 
-### `round(x) -> int`
+```cs
+ceil(3.2)     // 4
+ceil(-3.2)    // -3
+ceil(5)       // 5
+```
+
+#### `round(x) -> int`
 
 Rounds to nearest integer (0.5 rounds away from zero). Returns int.
 
-### `sqrt(x) -> float`
+```cs
+round(3.7)    // 4
+round(3.2)    // 3
+round(3.5)    // 4
+round(-3.5)   // -4
+```
+
+#### `trunc(x) -> int`
+
+Truncates decimal part (rounds toward zero). Returns int.
+
+```cs
+trunc(3.7)    // 3
+trunc(-3.7)   // -3
+trunc(5)      // 5
+```
+
+### Powers and Roots
+
+#### `sqrt(x) -> float`
 
 Returns square root. Accepts int or float, always returns float.
 
-### `pow(base, exp) -> float`
+```cs
+sqrt(16)      // 4.0
+sqrt(2)       // 1.414...
+sqrt(0)       // 0.0
+```
+
+#### `pow(base, exp) -> float`
 
 Returns `base` raised to `exp` power. Accepts int or float, returns float.
 
-### `sin(x) -> float`
+```cs
+pow(2, 8)     // 256.0
+pow(10, 3)    // 1000.0
+pow(2, -1)    // 0.5
+pow(4, 0.5)   // 2.0 (square root)
+```
 
-Returns sine of `x` (radians). Accepts int or float.
+#### `exp(x) -> float`
 
-### `cos(x) -> float`
+Returns $e^x$ (Euler's number raised to power x).
 
-Returns cosine of `x` (radians). Accepts int or float.
+```cs
+exp(0)        // 1.0
+exp(1)        // 2.71828... (E)
+exp(2)        // 7.389...
+```
 
-### `tan(x) -> float`
+### Logarithms
 
-Returns tangent of `x` (radians). Accepts int or float.
+#### `log(x) -> float`
 
-### `log(x) -> float`
+Returns natural logarithm of `x` (base $e$).
 
-Returns natural logarithm of `x` (base $e$). Accepts int or float.
+```cs
+log(E)        // 1.0
+log(1)        // 0.0
+log(10)       // 2.302...
+```
 
-### `exp(x) -> float`
+#### `log10(x) -> float`
 
-Returns $e^x$. Accepts int or float.
+Returns base-10 logarithm of `x`.
 
-### `random() -> float`
+```cs
+log10(100)    // 2.0
+log10(1000)   // 3.0
+log10(1)      // 0.0
+```
 
-Returns a pseudo-random float in the range $[0, 1)$.
+#### `log2(x) -> float`
+
+Returns base-2 logarithm of `x`.
+
+```cs
+log2(8)       // 3.0
+log2(1024)    // 10.0
+log2(1)       // 0.0
+```
+
+### Trigonometry
+
+All trigonometric functions use **radians**. Use `PI` constant for conversions.
+
+#### `sin(x) -> float`
+
+Returns sine of `x` (radians).
+
+```cs
+sin(0)           // 0.0
+sin(PI / 2)      // 1.0
+sin(PI)          // ~0.0
+```
+
+#### `cos(x) -> float`
+
+Returns cosine of `x` (radians).
+
+```cs
+cos(0)           // 1.0
+cos(PI / 2)      // ~0.0
+cos(PI)          // -1.0
+```
+
+#### `tan(x) -> float`
+
+Returns tangent of `x` (radians).
+
+```cs
+tan(0)           // 0.0
+tan(PI / 4)      // 1.0
+```
+
+#### `asin(x) -> float`
+
+Returns arc sine of `x` (result in radians). Input must be in range [-1, 1].
+
+```cs
+asin(0)          // 0.0
+asin(1)          // 1.5707... (PI/2)
+asin(0.5)        // 0.5235... (PI/6)
+```
+
+#### `acos(x) -> float`
+
+Returns arc cosine of `x` (result in radians). Input must be in range [-1, 1].
+
+```cs
+acos(1)          // 0.0
+acos(0)          // 1.5707... (PI/2)
+acos(-1)         // 3.1415... (PI)
+```
+
+#### `atan(x) -> float`
+
+Returns arc tangent of `x` (result in radians).
+
+```cs
+atan(0)          // 0.0
+atan(1)          // 0.7853... (PI/4)
+atan(-1)         // -0.7853... (-PI/4)
+```
+
+#### `atan2(y, x) -> float`
+
+Returns arc tangent of `y/x` using signs of both arguments to determine quadrant (result in radians, range [-π, π]).
+
+```cs
+atan2(1, 1)      // 0.7853... (PI/4, 45°)
+atan2(1, 0)      // 1.5707... (PI/2, 90°)
+atan2(0, -1)     // 3.1415... (PI, 180°)
+atan2(-1, 0)     // -1.5707... (-PI/2, -90°)
+```
+
+**Use Case:** Converting Cartesian coordinates to polar angle:
+
+```cs
+let angle = atan2(y, x);  // Correctly handles all quadrants
+```
+
+### Random Functions
+
+All random functions automatically seed on first use.
+
+#### `random() -> float`
+
+Returns a pseudo-random float in the range [0.0, 1.0).
+
+```cs
+let r = random();        // e.g., 0.7234...
+let percent = random() * 100;  // 0 to 100
+```
+
+#### `random_int(min, max) -> int`
+
+Returns a random integer in the range [min, max] (inclusive).
+
+```cs
+random_int(1, 6)         // Dice roll: 1, 2, 3, 4, 5, or 6
+random_int(0, 100)       // Random percentage
+random_int(-10, 10)      // Random value from -10 to 10
+```
+
+**Note:** Arguments can be in any order (automatically swapped if needed).
+
+#### `random_choice(list) -> value`
+
+Returns a random element from a list. Returns `nil` if list is empty.
+
+```cs
+let colors = ["red", "green", "blue"];
+let color = random_choice(colors);  // e.g., "green"
+
+let options = [1, 2, 3, 4, 5];
+let pick = random_choice(options);  // e.g., 3
+```
+
+#### `shuffle(list) -> nil`
+
+Randomly shuffles a list in-place using Fisher-Yates algorithm. Returns `nil`.
+
+```cs
+let deck = [1, 2, 3, 4, 5];
+shuffle(deck);
+print(deck);  // e.g., [3, 1, 5, 2, 4]
+```
+
+**Use Case:** Randomize order for games, simulations, or sampling.
+
+### Degree/Radian Conversion
+
+```cs
+// Degrees to radians
+fn deg_to_rad(deg) { return deg * PI / 180; }
+
+// Radians to degrees
+fn rad_to_deg(rad) { return rad * 180 / PI; }
+
+// Examples
+let angle_rad = deg_to_rad(90);   // PI/2
+let angle_deg = rad_to_deg(PI);   // 180
+```
 
 ## Math Constants
 
 ### `PI`
 
-The constant $\pi$.
+The constant π ≈ 3.14159265358979323846.
+
+```cs
+let circumference = 2 * PI * radius;
+let area = PI * radius * radius;
+```
 
 ### `E`
 
-The constant $e$.
+Euler's number $e$ ≈ 2.71828182845904523536.
 
-Example:
+```cs
+let growth = E;
+let decay = exp(-t / tau);
+```
 
-```c
-let x = sqrt(16);     // 4.0
-let y = pow(2, 8);    // 256.0
-let z = abs(-42);     // 42
-let m = min(3, 7, 2); // 2
-let s = sin(PI / 2);  // ~1.0
-let c = cos(0);       // 1.0
-let t = tan(0);       // 0.0
-let l = log(E);       // ~1.0
-let ex = exp(1);      // ~2.71828
-let r = random();     // [0, 1)
+### Complete Example
+
+```cs
+// Calculate distance between two points
+fn distance(x1, y1, x2, y2) {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    return sqrt(dx * dx + dy * dy);
+}
+
+// Clamp value with bounds checking
+fn safe_clamp(val, minimum, maximum) {
+    return clamp(val, min(minimum, maximum), max(minimum, maximum));
+}
+
+// Random point on unit circle
+fn random_unit_circle() {
+    let angle = random() * 2 * PI;
+    return {x: cos(angle), y: sin(angle)};
+}
+
+// Test math functions
+print("Distance:", distance(0, 0, 3, 4));  // 5.0
+print("Clamped:", safe_clamp(15, 0, 10));  // 10
+let point = random_unit_circle();
+print("Random point:", point.x, point.y);
 ```
 
 ## Conversion
