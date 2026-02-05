@@ -14,6 +14,9 @@
 - [Data Quality-of-Life](#data-quality-of-life)
 - [String Ops](#string-ops)
 - [List Utilities](#list-utilities)
+- [Advanced List Operations](#advanced-list-operations)
+- [Random Utilities](#random-utilities)
+- [String Padding and Formatting](#string-padding-and-formatting)
 - [Path Ops](#path-ops)
 - [Date / Time](#date--time)
 - [Filesystem](#filesystem)
@@ -601,43 +604,224 @@ Removes `nil` values.
 
 Sums numeric elements (ignores `nil`). Returns `nil` if any non-number is present.
 
-### String Ergonomics
+## Advanced List Operations
 
-#### `str_trim(s: string) -> string` / `trim(s: string) -> string`
+### `list_intersection(list1, list2) -> list`
+
+Returns a new list containing elements that appear in both lists (no duplicates).
+
+Example:
+
+```c
+let a = [1, 2, 3, 4];
+let b = [3, 4, 5, 6];
+print(list_intersection(a, b));  // [3, 4]
+```
+
+### `list_difference(list1, list2) -> list`
+
+Returns a new list containing elements in `list1` that are not in `list2`.
+
+Example:
+
+```c
+let a = [1, 2, 3, 4];
+let b = [3, 4, 5, 6];
+print(list_difference(a, b));  // [1, 2]
+```
+
+### `list_union(list1, list2) -> list`
+
+Returns a new list containing all unique elements from both lists.
+
+Example:
+
+```c
+let a = [1, 2, 3];
+let b = [3, 4, 5];
+print(list_union(a, b));  // [1, 2, 3, 4, 5]
+```
+
+### `list_partition(list, predicate: function) -> [list, list]`
+
+Splits a list into two lists based on a predicate function.
+
+Returns `[truthy_list, falsy_list]` where:
+* `truthy_list` contains items for which `predicate(item)` is truthy
+* `falsy_list` contains items for which `predicate(item)` is falsy
+
+Example:
+
+```c
+fn is_even(x) { return x % 2 == 0; }
+let numbers = [1, 2, 3, 4, 5, 6];
+let parts = list_partition(numbers, is_even);
+print(parts[0]);  // [2, 4, 6] - even numbers
+print(parts[1]);  // [1, 3, 5] - odd numbers
+```
+
+### `take(list, n: int) -> list`
+
+Returns a new list containing the first `n` elements.
+
+Example:
+
+```c
+let items = [1, 2, 3, 4, 5];
+print(take(items, 3));  // [1, 2, 3]
+print(take(items, 10)); // [1, 2, 3, 4, 5] - takes all available
+```
+
+### `drop(list, n: int) -> list`
+
+Returns a new list with the first `n` elements removed.
+
+Example:
+
+```c
+let items = [1, 2, 3, 4, 5];
+print(drop(items, 2));  // [3, 4, 5]
+print(drop(items, 10)); // [] - drops all
+```
+
+## Random Utilities
+
+### `random_choice(list) -> value | nil`
+
+Returns a random element from the list, or `nil` if the list is empty.
+
+Example:
+
+```c
+let prizes = ["Car", "TV", "Hat"];
+let winner = random_choice(prizes);
+print("You won: " + winner);
+```
+
+### `shuffle(list) -> nil`
+
+Randomly reorders the elements of the list **in place** using Fisher-Yates shuffle.
+
+Example:
+
+```c
+let deck = [1, 2, 3, 4, 5];
+shuffle(deck);
+print(deck);  // e.g., [3, 1, 5, 2, 4]
+```
+
+### `random_int(min: int, max: int) -> int`
+
+Returns a random integer between `min` and `max` (inclusive).
+
+Example:
+
+```c
+let dice_roll = random_int(1, 6);
+print("You rolled: " + to_str(dice_roll));
+```
+
+## String Padding and Formatting
+
+Functions for formatting strings with padding and alignment.
+
+### `str_pad_left(s: string, width: int, fill?: string) -> string`
+
+Pads the string on the left with spaces (or a custom fill character) to reach the desired width.
+
+* If `width` is less than or equal to the string length, returns the original string unchanged.
+* Optional third parameter specifies the fill character (default is space `" "`).
+
+Example:
+
+```c
+print(str_pad_left("42", 5));       // "   42"
+print(str_pad_left("42", 5, "0"));  // "00042"
+print(str_pad_left("hello", 3));    // "hello" (no padding)
+```
+
+### `str_pad_right(s: string, width: int, fill?: string) -> string`
+
+Pads the string on the right with spaces (or a custom fill character) to reach the desired width.
+
+* If `width` is less than or equal to the string length, returns the original string unchanged.
+* Optional third parameter specifies the fill character (default is space `" "`).
+
+Example:
+
+```c
+print(str_pad_right("42", 5));       // "42   "
+print(str_pad_right("42", 5, "-"));  // "42---"
+print(str_pad_right("hello", 3));    // "hello" (no padding)
+```
+
+## String Ergonomics
+
+### `str_trim(s: string) -> string` / `trim(s: string) -> string`
 
 Removes leading and trailing whitespace.
 
-#### `str_ltrim(s: string) -> string` / `ltrim(s: string) -> string`
+### `str_ltrim(s: string) -> string` / `ltrim(s: string) -> string`
 
 Removes leading whitespace only.
 
-#### `str_rtrim(s: string) -> string` / `rtrim(s: string) -> string`
+### `str_rtrim(s: string) -> string` / `rtrim(s: string) -> string`
 
 Removes trailing whitespace only.
 
-#### `str_lower(s: string) -> string` / `lower(s: string) -> string`
+### `str_lower(s: string) -> string` / `lower(s: string) -> string`
 
 Converts string to lowercase (ASCII only).
 
-#### `str_upper(s: string) -> string` / `upper(s: string) -> string`
+### `str_upper(s: string) -> string` / `upper(s: string) -> string`
 
 Converts string to uppercase (ASCII only).
 
-#### `str_startswith(s: string, prefix: string) -> bool` / `starts_with(s, prefix) -> bool`
+### `str_startswith(s: string, prefix: string) -> bool` / `starts_with(s, prefix) -> bool`
 
 Returns `true` if string starts with the given prefix.
 
-#### `str_endswith(s: string, suffix: string) -> bool` / `ends_with(s, suffix) -> bool`
+### `str_endswith(s: string, suffix: string) -> bool` / `ends_with(s, suffix) -> bool`
 
 Returns `true` if string ends with the given suffix.
 
-#### `str_repeat(s: string, count: int) -> string`
+### `str_repeat(s: string, count: int) -> string`
 
 Returns a new string with `s` repeated `count` times.
 
-#### `split_lines(s: string) -> list[string]`
+### `split_lines(s: string) -> list[string]`
 
 Splits the string on `\n` or `\r\n`. An empty trailing line is preserved.
+
+#### `str_pad_left(s: string, width: int, fill?: string) -> string`
+
+Pads the string on the left with spaces (or a custom fill character) to reach the desired width.
+
+* If `width` is less than or equal to the string length, returns the original string unchanged.
+* Optional third parameter specifies the fill character (default is space `" "`).
+
+Example:
+
+```c
+print(str_pad_left("42", 5));       // "   42"
+print(str_pad_left("42", 5, "0"));  // "00042"
+print(str_pad_left("hello", 3));    // "hello" (no padding)
+```
+
+#### `str_pad_right(s: string, width: int, fill?: string) -> string`
+
+Pads the string on the right with spaces (or a custom fill character) to reach the desired width.
+
+* If `width` is less than or equal to the string length, returns the original string unchanged.
+* Optional third parameter specifies the fill character (default is space `" "`).
+
+Example:
+
+```c
+print(str_pad_right("42", 5));       // "42   "
+print(str_pad_right("42", 5, "-"));  // "42---"
+print(str_pad_right("hello", 3));    // "hello" (no padding)
+```
 
 Example:
 

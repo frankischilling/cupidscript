@@ -518,8 +518,8 @@ static int nf_http_request(cs_vm* vm, void* ud, int argc, const cs_value* argv, 
         }
     }
 
-    cs_http_parser parser;
-    cs_http_parser_init(&parser, vm);
+    cs_http_parser http_parser;
+    cs_http_parser_init(&http_parser, vm);
 
     char buf[4096];
     for (;;) {
@@ -530,8 +530,8 @@ static int nf_http_request(cs_vm* vm, void* ud, int argc, const cs_value* argv, 
             n = (int)recv(fd, buf, sizeof(buf), 0);
         }
         if (n <= 0) break;
-        cs_http_parser_feed(&parser, buf, (size_t)n);
-        if (cs_http_parser_is_done(&parser)) break;
+        cs_http_parser_feed(&http_parser, buf, (size_t)n);
+        if (cs_http_parser_is_done(&http_parser)) break;
     }
 
 #ifndef CS_NO_TLS
@@ -541,12 +541,12 @@ static int nf_http_request(cs_vm* vm, void* ud, int argc, const cs_value* argv, 
 
     cs_value resp = cs_map(vm);
     if (resp.as.p) {
-        cs_map_set(resp, "status", cs_int(parser.status_code));
-        cs_map_set(resp, "status_text", cs_str(vm, parser.status_text));
-        cs_map_set(resp, "headers", parser.headers);
-        cs_map_set(resp, "body", cs_str_take(vm, parser.body ? parser.body : dup_cstr(""), (uint64_t)parser.body_len));
-        parser.body = NULL;
-        parser.body_len = 0;
+        cs_map_set(resp, "status", cs_int(http_parser.status_code));
+        cs_map_set(resp, "status_text", cs_str(vm, http_parser.status_text));
+        cs_map_set(resp, "headers", http_parser.headers);
+        cs_map_set(resp, "body", cs_str_take(vm, http_parser.body ? http_parser.body : dup_cstr(""), (uint64_t)http_parser.body_len));
+        http_parser.body = NULL;
+        http_parser.body_len = 0;
     }
 
     cs_value_release(url_val);
@@ -559,7 +559,7 @@ static int nf_http_request(cs_vm* vm, void* ud, int argc, const cs_value* argv, 
     cs_value_release(query);
     cs_value_release(headers_val);
     cs_value_release(body_val);
-    cs_http_parser_free(&parser);
+    cs_http_parser_free(&http_parser);
 
     if (out) *out = resp;
     return 0;

@@ -563,21 +563,21 @@ static ast* parse_primary(parser* P) {
         // Check for set comprehension: {expr for var in iter} (no colon)
         if (first_key && first_key->type != N_SPREAD && P->tok.type == TK_FOR) {
             // Set comprehension: {expr for var in iterable} or multiple for clauses
-            ast* n = node(P, N_SETCOMP);
-            n->as.setcomp.expr = first_key;
-            n->as.setcomp.vars = NULL;
-            n->as.setcomp.vars2 = NULL;
-            n->as.setcomp.iterables = NULL;
-            n->as.setcomp.iter_count = 0;
-            n->as.setcomp.filter = NULL;
+            ast* comp_node = node(P, N_SETCOMP);
+            comp_node->as.setcomp.expr = first_key;
+            comp_node->as.setcomp.vars = NULL;
+            comp_node->as.setcomp.vars2 = NULL;
+            comp_node->as.setcomp.iterables = NULL;
+            comp_node->as.setcomp.iter_count = 0;
+            comp_node->as.setcomp.filter = NULL;
 
             // Allocate arrays for iteration clauses (start with capacity of 4)
             size_t capacity = 4;
-            n->as.setcomp.vars = (char**)malloc(sizeof(char*) * capacity);
-            n->as.setcomp.vars2 = (char**)malloc(sizeof(char*) * capacity);
-            n->as.setcomp.iterables = (ast**)malloc(sizeof(ast*) * capacity);
-            if (!n->as.setcomp.vars || !n->as.setcomp.vars2 || !n->as.setcomp.iterables) {
-                ast_free(n);
+            comp_node->as.setcomp.vars = (char**)malloc(sizeof(char*) * capacity);
+            comp_node->as.setcomp.vars2 = (char**)malloc(sizeof(char*) * capacity);
+            comp_node->as.setcomp.iterables = (ast**)malloc(sizeof(ast*) * capacity);
+            if (!comp_node->as.setcomp.vars || !comp_node->as.setcomp.vars2 || !comp_node->as.setcomp.iterables) {
+                ast_free(comp_node);
                 if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory");
                 return NULL;
             }
@@ -593,25 +593,25 @@ static ast* parse_primary(parser* P) {
                 }
 
                 if (P->tok.type != TK_IDENT) {
-                    ast_free(n);
+                    ast_free(comp_node);
                     if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after 'for'");
                     return NULL;
                 }
 
                 // Grow arrays if needed
-                if (n->as.setcomp.iter_count >= capacity) {
+                if (comp_node->as.setcomp.iter_count >= capacity) {
                     capacity *= 2;
-                    char** new_vars = (char**)realloc(n->as.setcomp.vars, sizeof(char*) * capacity);
-                    char** new_vars2 = (char**)realloc(n->as.setcomp.vars2, sizeof(char*) * capacity);
-                    ast** new_iterables = (ast**)realloc(n->as.setcomp.iterables, sizeof(ast*) * capacity);
+                    char** new_vars = (char**)realloc(comp_node->as.setcomp.vars, sizeof(char*) * capacity);
+                    char** new_vars2 = (char**)realloc(comp_node->as.setcomp.vars2, sizeof(char*) * capacity);
+                    ast** new_iterables = (ast**)realloc(comp_node->as.setcomp.iterables, sizeof(ast*) * capacity);
                     if (!new_vars || !new_vars2 || !new_iterables) {
-                        ast_free(n);
+                        ast_free(comp_node);
                         if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory");
                         return NULL;
                     }
-                    n->as.setcomp.vars = new_vars;
-                    n->as.setcomp.vars2 = new_vars2;
-                    n->as.setcomp.iterables = new_iterables;
+                    comp_node->as.setcomp.vars = new_vars;
+                    comp_node->as.setcomp.vars2 = new_vars2;
+                    comp_node->as.setcomp.iterables = new_iterables;
                 }
 
                 // Parse first variable
@@ -623,7 +623,7 @@ static ast* parse_primary(parser* P) {
                 if (accept(P, TK_COMMA)) {
                     if (P->tok.type != TK_IDENT) {
                         free(var1);
-                        ast_free(n);
+                        ast_free(comp_node);
                         if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after ','");
                         return NULL;
                     }
@@ -636,7 +636,7 @@ static ast* parse_primary(parser* P) {
                     if (!accept(P, TK_RBRACKET)) {
                         free(var1);
                         free(var2);
-                        ast_free(n);
+                        ast_free(comp_node);
                         if (!P->error) P->error = fmt_err(P, &P->tok, "expected ']' after destructuring pattern");
                         return NULL;
                     }
@@ -649,35 +649,35 @@ static ast* parse_primary(parser* P) {
                     var1 = prefixed;
                 }
 
-                n->as.setcomp.vars[n->as.setcomp.iter_count] = var1;
-                n->as.setcomp.vars2[n->as.setcomp.iter_count] = var2;
+                comp_node->as.setcomp.vars[comp_node->as.setcomp.iter_count] = var1;
+                comp_node->as.setcomp.vars2[comp_node->as.setcomp.iter_count] = var2;
 
                 if (!accept(P, TK_IN)) {
-                    ast_free(n);
+                    ast_free(comp_node);
                     if (!P->error) P->error = fmt_err(P, &P->tok, "expected 'in' in comprehension");
                     return NULL;
                 }
 
-                n->as.setcomp.iterables[n->as.setcomp.iter_count] = parse_expr(P);
-                if (!n->as.setcomp.iterables[n->as.setcomp.iter_count]) {
-                    ast_free(n);
+                comp_node->as.setcomp.iterables[comp_node->as.setcomp.iter_count] = parse_expr(P);
+                if (!comp_node->as.setcomp.iterables[comp_node->as.setcomp.iter_count]) {
+                    ast_free(comp_node);
                     return NULL;
                 }
 
-                n->as.setcomp.iter_count++;
+                comp_node->as.setcomp.iter_count++;
             }
 
             // Optional filter: if condition
             if (accept(P, TK_IF)) {
-                n->as.setcomp.filter = parse_expr(P);
-                if (!n->as.setcomp.filter) {
-                    ast_free(n);
+                comp_node->as.setcomp.filter = parse_expr(P);
+                if (!comp_node->as.setcomp.filter) {
+                    ast_free(comp_node);
                     return NULL;
                 }
             }
             
             expect(P, TK_RBRACE, "expected '}'");
-            return n;
+            return comp_node;
         }
 
         // Check for comprehension: {k: v for k, v in iter}
@@ -692,22 +692,22 @@ static ast* parse_primary(parser* P) {
 
             if (P->tok.type == TK_FOR) {
                 // Map comprehension: {key_expr: val_expr for k, v in iterable} or multiple for clauses
-                ast* n = node(P, N_MAPCOMP);
-                n->as.mapcomp.key_expr = first_key;
-                n->as.mapcomp.val_expr = first_val;
-                n->as.mapcomp.key_vars = NULL;
-                n->as.mapcomp.val_vars = NULL;
-                n->as.mapcomp.iterables = NULL;
-                n->as.mapcomp.iter_count = 0;
-                n->as.mapcomp.filter = NULL;
+                ast* comp_node = node(P, N_MAPCOMP);
+                comp_node->as.mapcomp.key_expr = first_key;
+                comp_node->as.mapcomp.val_expr = first_val;
+                comp_node->as.mapcomp.key_vars = NULL;
+                comp_node->as.mapcomp.val_vars = NULL;
+                comp_node->as.mapcomp.iterables = NULL;
+                comp_node->as.mapcomp.iter_count = 0;
+                comp_node->as.mapcomp.filter = NULL;
 
                 // Allocate arrays for iteration clauses (start with capacity of 4)
                 size_t capacity = 4;
-                n->as.mapcomp.key_vars = (char**)malloc(sizeof(char*) * capacity);
-                n->as.mapcomp.val_vars = (char**)malloc(sizeof(char*) * capacity);
-                n->as.mapcomp.iterables = (ast**)malloc(sizeof(ast*) * capacity);
-                if (!n->as.mapcomp.key_vars || !n->as.mapcomp.val_vars || !n->as.mapcomp.iterables) {
-                    ast_free(n);
+                comp_node->as.mapcomp.key_vars = (char**)malloc(sizeof(char*) * capacity);
+                comp_node->as.mapcomp.val_vars = (char**)malloc(sizeof(char*) * capacity);
+                comp_node->as.mapcomp.iterables = (ast**)malloc(sizeof(ast*) * capacity);
+                if (!comp_node->as.mapcomp.key_vars || !comp_node->as.mapcomp.val_vars || !comp_node->as.mapcomp.iterables) {
+                    ast_free(comp_node);
                     if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory");
                     return NULL;
                 }
@@ -723,25 +723,25 @@ static ast* parse_primary(parser* P) {
                     }
 
                     if (P->tok.type != TK_IDENT) {
-                        ast_free(n);
+                        ast_free(comp_node);
                         if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after 'for'");
                         return NULL;
                     }
 
                     // Grow arrays if needed
-                    if (n->as.mapcomp.iter_count >= capacity) {
+                    if (comp_node->as.mapcomp.iter_count >= capacity) {
                         capacity *= 2;
-                        char** new_key_vars = (char**)realloc(n->as.mapcomp.key_vars, sizeof(char*) * capacity);
-                        char** new_val_vars = (char**)realloc(n->as.mapcomp.val_vars, sizeof(char*) * capacity);
-                        ast** new_iterables = (ast**)realloc(n->as.mapcomp.iterables, sizeof(ast*) * capacity);
+                        char** new_key_vars = (char**)realloc(comp_node->as.mapcomp.key_vars, sizeof(char*) * capacity);
+                        char** new_val_vars = (char**)realloc(comp_node->as.mapcomp.val_vars, sizeof(char*) * capacity);
+                        ast** new_iterables = (ast**)realloc(comp_node->as.mapcomp.iterables, sizeof(ast*) * capacity);
                         if (!new_key_vars || !new_val_vars || !new_iterables) {
-                            ast_free(n);
+                            ast_free(comp_node);
                             if (!P->error) P->error = fmt_err(P, &P->tok, "out of memory");
                             return NULL;
                         }
-                        n->as.mapcomp.key_vars = new_key_vars;
-                        n->as.mapcomp.val_vars = new_val_vars;
-                        n->as.mapcomp.iterables = new_iterables;
+                        comp_node->as.mapcomp.key_vars = new_key_vars;
+                        comp_node->as.mapcomp.val_vars = new_val_vars;
+                        comp_node->as.mapcomp.iterables = new_iterables;
                     }
 
                     // Parse first variable
@@ -753,7 +753,7 @@ static ast* parse_primary(parser* P) {
                     if (accept(P, TK_COMMA)) {
                         if (P->tok.type != TK_IDENT) {
                             free(var1);
-                            ast_free(n);
+                            ast_free(comp_node);
                             if (!P->error) P->error = fmt_err(P, &P->tok, "expected identifier after ','");
                             return NULL;
                         }
@@ -766,7 +766,7 @@ static ast* parse_primary(parser* P) {
                         if (!accept(P, TK_RBRACKET)) {
                             free(var1);
                             free(var2);
-                            ast_free(n);
+                            ast_free(comp_node);
                             if (!P->error) P->error = fmt_err(P, &P->tok, "expected ']' after destructuring pattern");
                             return NULL;
                         }
@@ -779,36 +779,36 @@ static ast* parse_primary(parser* P) {
                         var1 = prefixed;
                     }
 
-                    n->as.mapcomp.key_vars[n->as.mapcomp.iter_count] = var1;
-                    n->as.mapcomp.val_vars[n->as.mapcomp.iter_count] = var2;
+                    comp_node->as.mapcomp.key_vars[comp_node->as.mapcomp.iter_count] = var1;
+                    comp_node->as.mapcomp.val_vars[comp_node->as.mapcomp.iter_count] = var2;
 
                     if (!accept(P, TK_IN)) {
-                        ast_free(n);
+                        ast_free(comp_node);
                         if (!P->error) P->error = fmt_err(P, &P->tok, "expected 'in' in comprehension");
                         return NULL;
                     }
 
-                    n->as.mapcomp.iterables[n->as.mapcomp.iter_count] = parse_expr(P);
-                    if (!n->as.mapcomp.iterables[n->as.mapcomp.iter_count]) {
-                        ast_free(n);
+                    comp_node->as.mapcomp.iterables[comp_node->as.mapcomp.iter_count] = parse_expr(P);
+                    if (!comp_node->as.mapcomp.iterables[comp_node->as.mapcomp.iter_count]) {
+                        ast_free(comp_node);
                         return NULL;
                     }
 
-                    n->as.mapcomp.iter_count++;
+                    comp_node->as.mapcomp.iter_count++;
                 }
 
                 // Optional filter
                 if (accept(P, TK_IF)) {
-                    n->as.mapcomp.filter = parse_expr(P);
-                    if (!n->as.mapcomp.filter) {
-                        ast_free(n);
+                    comp_node->as.mapcomp.filter = parse_expr(P);
+                    if (!comp_node->as.mapcomp.filter) {
+                        ast_free(comp_node);
                         return NULL;
                     }
                 }
                 
                 expect(P, TK_RBRACE, "expected '}'");
                 if (key_ident) free(key_ident);
-                return n;
+                return comp_node;
             }
 
             // Regular map literal

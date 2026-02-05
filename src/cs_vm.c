@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <ctype.h>
 #if !defined(_WIN32)
 #include <sys/time.h>
 #else
@@ -3609,6 +3610,7 @@ static cs_value eval_expr(cs_vm* vm, cs_env* env, ast* e, int* ok) {
                         cs_value_release(instance);
                     }
 class_done:
+                    ;
                 } else if (callee.type == CS_T_MAP && map_is_struct(callee)) {
                     cs_value fields_v = cs_nil();
                     cs_value defaults_v = cs_nil();
@@ -4239,6 +4241,7 @@ struct_done:
                             *ok = 0;
                         }
 strbuf_done:
+                        ;
                     } else if (self.type == CS_T_STR) {
                         // String methods: repeat, split, etc.
                         cs_string* str = as_str(self);
@@ -4665,6 +4668,7 @@ strbuf_done:
                             *ok = 0;
                         }
 strbuf_done_opt:
+                        ;
                     } else if (self.type == CS_T_STR) {
                         // String methods for optional chaining
                         cs_string* str = as_str(self);
@@ -5116,6 +5120,7 @@ strbuf_done_opt:
                         cs_value_release(instance);
                     }
 class_done_call:
+                    ;
                 } else if (callee.type == CS_T_MAP && map_is_struct(callee)) {
                     cs_value fields_v = cs_nil();
                     cs_value defaults_v = cs_nil();
@@ -6815,11 +6820,11 @@ size_t cs_vm_collect_cycles(cs_vm* vm) {
                     if (kk != (size_t)-1) items[kk].gc_refs--;
                 }
                 if (v.type == CS_T_LIST) {
-                    size_t k = gc_find_index(keys, types, vals, cap, CS_TRACK_LIST, v.as.p);
-                    if (k != (size_t)-1) items[k].gc_refs--;
+                    size_t gc_idx = gc_find_index(keys, types, vals, cap, CS_TRACK_LIST, v.as.p);
+                    if (gc_idx != (size_t)-1) items[gc_idx].gc_refs--;
                 } else if (v.type == CS_T_MAP) {
-                    size_t k = gc_find_index(keys, types, vals, cap, CS_TRACK_MAP, v.as.p);
-                    if (k != (size_t)-1) items[k].gc_refs--;
+                    size_t gc_idx = gc_find_index(keys, types, vals, cap, CS_TRACK_MAP, v.as.p);
+                    if (gc_idx != (size_t)-1) items[gc_idx].gc_refs--;
                 }
             }
         }
@@ -6864,11 +6869,11 @@ size_t cs_vm_collect_cycles(cs_vm* vm) {
                     if (kk != (size_t)-1 && !items[kk].marked) { items[kk].marked = 1; stack[sp++] = kk; }
                 }
                 if (v.type == CS_T_LIST) {
-                    size_t k = gc_find_index(keys, types, vals, cap, CS_TRACK_LIST, v.as.p);
-                    if (k != (size_t)-1 && !items[k].marked) { items[k].marked = 1; stack[sp++] = k; }
+                    size_t gc_idx = gc_find_index(keys, types, vals, cap, CS_TRACK_LIST, v.as.p);
+                    if (gc_idx != (size_t)-1 && !items[gc_idx].marked) { items[gc_idx].marked = 1; stack[sp++] = gc_idx; }
                 } else if (v.type == CS_T_MAP) {
-                    size_t k = gc_find_index(keys, types, vals, cap, CS_TRACK_MAP, v.as.p);
-                    if (k != (size_t)-1 && !items[k].marked) { items[k].marked = 1; stack[sp++] = k; }
+                    size_t gc_idx = gc_find_index(keys, types, vals, cap, CS_TRACK_MAP, v.as.p);
+                    if (gc_idx != (size_t)-1 && !items[gc_idx].marked) { items[gc_idx].marked = 1; stack[sp++] = gc_idx; }
                 }
             }
         }
