@@ -10,7 +10,7 @@ A lightweight C99 VM for a small scripting language. CupidScript is a modern, fe
 
 **Safety Without Compromise**: Built-in instruction limits and timeout controls protect host applications from runaway scripts. Scripts can't silently create variables through typos (assignment requires prior declaration with `let`).
 
-**Batteries Included**: The standard library provides comprehensive functionality for real-world scripting: JSON, regex, filesystems, CSV, XML, HTTP, subprocess management, and more—all accessible without external dependencies (except OpenSSL for HTTPS).
+**Batteries Included**: The standard library provides comprehensive functionality for real-world scripting: JSON, regex, filesystems, CSV, XML, HTTP, subprocess management, and more, all accessible without external dependencies (except OpenSSL for HTTPS).
 
 **Interoperable**: First-class support for data interchange (JSON, YAML), external processes, and C API integration means CupidScript works well as glue code and configuration language.
 
